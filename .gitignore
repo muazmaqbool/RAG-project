@@ -1,0 +1,14 @@
+# Environments
+venv/
+env/
+.env
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Data (We don't want to push thousands of JSON files to Git)
+data/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
