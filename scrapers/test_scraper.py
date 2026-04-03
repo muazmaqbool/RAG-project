@@ -16,49 +16,40 @@ def test_scrape_product(url):
 
     soup = BeautifulSoup(response.content, 'html.parser')
     
-    # 1. Core Elements
     title_elem = soup.select_one('h1.product_title')
     price_elem = soup.select_one('p.price bdi')
-    desc_elem = soup.select_one('div.product-description')
-    image_elem = soup.select_one('img#wpg-main-img')
+    
+    # --- UPDATED PRICE PARSING LOGIC ---
+    price_text = price_elem.text.lower() if price_elem else ""
+    pricing_data = {"amount_pkr": None, "is_call_for_price": False}
+    
+    if "call" in price_text or not price_text:
+        pricing_data["is_call_for_price"] = True
+    else:
+        # Extract only the digits
+        cleaned_price = "".join(filter(str.isdigit, price_text))
+        
+        if cleaned_price:
+            int_price = int(cleaned_price)
+            # NEW: If the integer is 0, it is a placeholder for 'Call for Price'
+            if int_price == 0:
+                pricing_data["is_call_for_price"] = True
+                pricing_data["amount_pkr"] = None
+            else:
+                pricing_data["amount_pkr"] = int_price
+                pricing_data["is_call_for_price"] = False
+        else:
+            pricing_data["is_call_for_price"] = True
+    # -----------------------------------
 
-    # 2. Extract Specifications Table
-    specs = {}
-    spec_rows = soup.select('tr.sts-attr-row')
-    if spec_rows:
-        for row in spec_rows:
-            key_elem = row.select_one('th')
-            val_elem = row.select_one('td.value')
-            if key_elem and val_elem:
-                specs[key_elem.text.strip()] = val_elem.text.strip()
-
-    # 3. Compile Data
     product_data = {
         "url": url,
-        "title": title_elem.text.strip() if title_elem else "MISSING",
-        "price_pkr": price_elem.text.replace('₨', '').replace(',', '').strip() if price_elem else "MISSING",
-        "description": desc_elem.text.strip() if desc_elem else "MISSING",
-        "image_url": image_elem.get('src') if image_elem else "MISSING",
-        "specifications": specs
+        "title": title_elem.text.strip() if title_elem else "Unknown",
+        "pricing": pricing_data
     }
 
     return product_data
 
-# --- OUR DIVERSE TEST BATCH ---
-test_urls = [
-    # A standard accessory (Card Reader)
-    "https://alaqsa.com.pk/product/onten-8107-usb3-0-to-cf-tf-sd-card-reader-with-usb3-02-ports/",
-    # A gaming accessory
-    "https://alaqsa.com.pk/product/onikuma-k19-professional-gaming-headphone/",
-    # A smart gadget
-    "https://alaqsa.com.pk/product/m8-64gb-hdmi-game-stick-lite-console/"
-]
-
-print("Starting Sandbox Test...\n" + "="*40)
-
-for url in test_urls:
-    print(f"\nScraping: {url}")
-    result = test_scrape_product(url)
-    # Print the result beautifully formatted
-    print(json.dumps(result, indent=4))
-    print("-" * 40)
+# Test it
+test_url = "https://alaqsa.com.pk/product/acer-3820-battery/"
+print(json.dumps(test_scrape_product(test_url), indent=4))

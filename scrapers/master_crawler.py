@@ -2,90 +2,137 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import time
+import os
 
-def extract_product_links_from_page(url):
-    """Extracts product URLs from a single page, identical to our bulletproof crawler."""
+def scrape_product_data(url, category_paths):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
+    
+    # Base schema for a 404/Unavailable product
+    base_data = {
+        "url": url,
+        "title": "Unknown",
+        "is_available": False,
+        "pricing": {"amount_pkr": None, "is_call_for_price": False},
+        "description": "",
+        "categories": category_paths,
+        "specifications": {}
+    }
+
     try:
-        response = requests.get(url, headers=headers)
+        # Increased timeout to 15 seconds to handle spotty internet
+        response = requests.get(url, headers=headers, timeout=15)
+        
         if response.status_code == 404:
-            return None # Reached the end of the pagination
+            print(f"  [-] 404 Not Found (Marking Unavailable): {url}")
+            return base_data
+            
         response.raise_for_status()
-    except requests.RequestException:
-        return None
+        
+    except requests.RequestException as e:
+        # CRITICAL: If the internet drops, we return None. 
+        # This ensures the item is NOT saved, so it will be retried next time.
+        print(f"  [!] Connection Error for {url}: {e}")
+        return None 
 
     soup = BeautifulSoup(response.content, 'html.parser')
-    product_urls = []
     
-    for a_tag in soup.find_all('a', href=True):
-        href = a_tag['href']
-        if '/product/' in href and '/product-category/' not in href:
-            product_urls.append(href)
-            
-    return list(set(product_urls))
+    title_elem = soup.select_one('h1.product_title')
+    price_elem = soup.select_one('p.price bdi')
+    desc_elem = soup.select_one('div.product-description')
+    
+    specs = {}
+    spec_rows = soup.select('tr.sts-attr-row')
+    if spec_rows:
+        for row in spec_rows:
+            key_elem = row.select_one('th')
+            val_elem = row.select_one('td.value')
+            if key_elem and val_elem:
+                specs[key_elem.text.strip()] = val_elem.text.strip()
 
-def crawl_category_with_pagination(base_category_url, category_path, master_dict):
-    """Crawls a category and all its subsequent pages (page/2/, page/3/, etc.)"""
-    page_num = 1
+    price_text = price_elem.text.lower() if price_elem else ""
+    pricing_data = {"amount_pkr": None, "is_call_for_price": False}
     
-    while True:
-        # WooCommerce standard pagination structure
-        current_url = base_category_url if page_num == 1 else f"{base_category_url}page/{page_num}/"
-        print(f"  -> Scanning: {current_url}")
-        
-        links = extract_product_links_from_page(current_url)
-        
-        # If we get None (404 error) or an empty list, we've hit the last page
-        if not links:
-            break
-            
-        for link in links:
-            if link not in master_dict:
-                master_dict[link] = []
-            
-            # Format the category path as a string (e.g., "New Laptops > Dell")
-            path_string = " > ".join(category_path)
-            if path_string not in master_dict[link]:
-                master_dict[link].append(path_string)
-                
-        page_num += 1
-        time.sleep(0.5) # BE POLITE: 0.5s delay so we don't crash your father's website!
+    if "call" in price_text or not price_text:
+        pricing_data["is_call_for_price"] = True
+    else:
+        cleaned_price = "".join(filter(str.isdigit, price_text))
+        if cleaned_price:
+            int_price = int(cleaned_price)
+            if int_price == 0:
+                pricing_data["is_call_for_price"] = True
+            else:
+                pricing_data["amount_pkr"] = int_price
+        else:
+            pricing_data["is_call_for_price"] = True
 
-def process_taxonomy_node(node, current_path, master_dict):
-    """Recursively traverses the JSON tree."""
-    category_name = node.get('name')
-    category_url = node.get('url')
-    
-    new_path = current_path + [category_name]
-    
-    # If it's a valid link, crawl it
-    if category_url and category_url != '#':
-        print(f"\nCrawling Category: {' > '.join(new_path)}")
-        crawl_category_with_pagination(category_url, new_path, master_dict)
-        
-    # If it has subcategories, dig deeper
-    subcategories = node.get('subcategories', [])
-    for sub_node in subcategories:
-        process_taxonomy_node(sub_node, new_path, master_dict)
+    product_data = {
+        "url": url,
+        "title": title_elem.text.strip() if title_elem else "Unknown",
+        "is_available": True,
+        "pricing": pricing_data,
+        "description": desc_elem.text.strip() if desc_elem else "",
+        "categories": category_paths,
+        "specifications": specs
+    }
 
-# --- EXECUTION ---
+    return product_data
+
 if __name__ == "__main__":
-    print("Loading taxonomy...")
-    with open('../data/raw/category_taxonomy.json', 'r', encoding='utf-8') as f:
-        taxonomy = json.load(f)
-        
-    master_product_dict = {}
+    input_file = '../data/raw/master_product_urls.json'
+    output_file = '../data/raw/final_scraped_dataset.json'
     
-    print("Initiating Master Crawl (This may take a few minutes...)")
-    for main_category in taxonomy:
-        process_taxonomy_node(main_category, [], master_product_dict)
+    print("Loading Master URLs...")
+    with open(input_file, 'r', encoding='utf-8') as f:
+        url_dict = json.load(f)
         
-    # Save the final mapping
-    output_file = '../data/raw/master_product_urls.json'
+    total_urls = len(url_dict)
+    final_dataset = []
+    scraped_urls = set()
+    
+    # --- RESUMABILITY LOGIC ---
+    if os.path.exists(output_file):
+        print("Found existing dataset. Loading to resume progress...")
+        with open(output_file, 'r', encoding='utf-8') as f:
+            try:
+                final_dataset = json.load(f)
+                # Create a fast-lookup set of URLs we already successfully processed
+                scraped_urls = {item['url'] for item in final_dataset}
+                print(f"Resuming from item {len(scraped_urls)}...")
+            except json.JSONDecodeError:
+                print("Error reading existing file. Starting fresh.")
+    
+    count = 0
+    new_items_this_run = 0
+    
+    for url, categories in url_dict.items():
+        count += 1
+        
+        # Skip if we already scraped it in a previous run
+        if url in scraped_urls:
+            continue
+            
+        print(f"Scraping {count}/{total_urls}: {url}")
+        
+        data = scrape_product_data(url, categories)
+        
+        # If data is None, an internet error occurred. We skip saving so it retries later.
+        if data:
+            final_dataset.append(data)
+            scraped_urls.add(url)
+            new_items_this_run += 1
+            
+            # Save progress frequently (every 10 successful items) to protect against drops
+            if new_items_this_run % 10 == 0:
+                with open(output_file, 'w', encoding='utf-8') as f:
+                    json.dump(final_dataset, f, indent=4)
+                print(f"  --> Progress saved ({len(final_dataset)} total items)")
+                
+        time.sleep(0.5) 
+
+    # Final Save when the loop finishes
     with open(output_file, 'w', encoding='utf-8') as f:
-        json.dump(master_product_dict, f, indent=4)
+        json.dump(final_dataset, f, indent=4)
         
-    print(f"\nDone! Found {len(master_product_dict)} unique products.")
-    print(f"Data saved to {output_file}")
+    print(f"\nScraping complete! Dataset contains {len(final_dataset)} products.")
