@@ -44,52 +44,64 @@ if st.button("Search Inventory", type="primary"):
                 response.raise_for_status()
                 data = response.json()
                 
-                ai_recommendation = data.get("recommendation", "")
-                products = data.get("products", [])
+                explanation = data.get("explanation", "")
+                top_picks = data.get("top_picks", [])
+                alternatives = data.get("alternatives", [])
                 
-                if not products:
+                if not top_picks and not alternatives:
                     st.warning("No products found within that criteria. Try adjusting your budget!")
                 else:
-                    # --- 1. DISPLAY AI RECOMMENDATION ---
+                    # --- 1. DISPLAY AI VERDICT & LIST ---
                     st.subheader("✨ The AI Verdict")
-                    st.info(ai_recommendation)
+                    
+                    # Dynamically build the bulleted list you requested
+                    bullet_points = "**Recommendations:**\n"
+                    for pick in top_picks:
+                        category_name = pick.get('matched_intent', 'Item')
+                        bullet_points += f"* **{category_name}:** [{pick['title']}]({pick['url']})\n"
+                        
+                    # Render the list and the LLM's explanation inside the blue info box
+                    st.info(f"{bullet_points}\n\n{explanation}")
                     
                     st.divider()
                     
-                    # --- 2. DISPLAY PRODUCT CARDS ---
-                    st.subheader("🛒 Top 5 Database Matches")
+                    # --- 2. DISPLAY MULTIPLE GOLD CARDS ---
+                    st.subheader(f"🏆 Top Picks ({len(top_picks)} Items)")
                     
-                    # We will highlight the first result as the #1 Match
-                    top_product = products[0]
-                    other_products = products[1:]
+                    # Create a grid for the top picks if there are multiple
+                    pick_cols = st.columns(len(top_picks)) if len(top_picks) > 1 else [st.container()]
                     
-                    # Highlighted Card for the top match
-                    with st.container(border=True):
-                        st.markdown("### 🏆 #1 Best Match")
-                        st.markdown(f"**[{top_product['title']}]({top_product['url']})**")
-                        st.markdown(f"**Price:** <span style='color:#2e7d32; font-size:1.2em;'>{top_product['price']:,} PKR</span>", unsafe_allow_html=True)
-                        st.write(top_product['description'])
-                        st.caption(f"Semantic Match Score: {top_product['match_score']}%")
+                    for i, pick in enumerate(top_picks):
+                        target_col = pick_cols[i] if len(top_picks) > 1 else pick_cols[0]
+                        with target_col:
+                            with st.container(border=True):
+                                st.markdown(f"### 🥇 Best {pick.get('matched_intent', 'Match')}")
+                                st.markdown(f"**[{pick['title']}]({pick['url']})**")
+                                st.markdown(f"**Price:** <span style='color:#2e7d32; font-size:1.2em;'>{pick['price']:,} PKR</span>", unsafe_allow_html=True)
+                                st.write(pick['description'])
+                                st.caption(f"Semantic Match Score: {pick['match_score']}%")
                     
                     st.write("---")
                     
-                    # A grid of 2 columns for the remaining 4 products
-                    col1, col2 = st.columns(2)
-                    
-                    for i, product in enumerate(other_products):
-                        # Alternate between left and right columns
-                        target_col = col1 if i % 2 == 0 else col2
+                    # --- 3. DISPLAY ALTERNATIVES ---
+                    if alternatives:
+                        st.subheader("🛒 Other Great Options")
+                        col1, col2 = st.columns(2)
                         
-                        with target_col:
-                            with st.container(border=True):
-                                # Truncate long titles for UI cleanliness
-                                short_title = product['title'][:60] + "..." if len(product['title']) > 60 else product['title']
-                                st.markdown(f"**[{short_title}]({product['url']})**")
-                                st.markdown(f"**Price:** {product['price']:,} PKR")
-                                # Show only the first two sentences of the description to keep cards neat
-                                short_desc = ".".join(product['description'].split('.')[:2]) + "."
-                                st.write(short_desc)
-                                st.caption(f"Match Score: {product['match_score']}%")
+                        for i, product in enumerate(alternatives):
+                            target_col = col1 if i % 2 == 0 else col2
+                            
+                            with target_col:
+                                with st.container(border=True):
+                                    # Add the category tag at the top of the card
+                                    st.caption(f"Category: **{product.get('matched_intent', 'General')}**")
+                                    
+                                    short_title = product['title'][:60] + "..." if len(product['title']) > 60 else product['title']
+                                    st.markdown(f"**[{short_title}]({product['url']})**")
+                                    st.markdown(f"**Price:** {product['price']:,} PKR")
+                                    short_desc = ".".join(product['description'].split('.')[:2]) + "."
+                                    st.write(short_desc)
+                                    st.caption(f"Match Score: {product['match_score']}%")
 
             except Exception as e:
                 st.error(f"Failed to connect to the API. Make sure your FastAPI server is running! Error: {e}")

@@ -38,45 +38,110 @@ def get_db_connection():
         port="5432"
     )
 
+# --- TAXONOMY LOADER ---
+TAXONOMY_FILE = 'data/raw/category_taxonomy.json'
+VALID_CATEGORIES = []
+
+if os.path.exists(TAXONOMY_FILE):
+    with open(TAXONOMY_FILE, 'r', encoding='utf-8') as f:
+        taxonomy_tree = json.load(f)
+        
+    # Recursive function to pull just the names out of your nested JSON tree
+    def extract_category_names(nodes):
+        names = []
+        for node in nodes:
+            names.append(node['name'])
+            if 'subcategories' in node:
+                names.extend(extract_category_names(node['subcategories']))
+        return names
+        
+    VALID_CATEGORIES = list(set(extract_category_names(taxonomy_tree)))
+    print(f"Loaded {len(VALID_CATEGORIES)} official categories from taxonomy.")
+else:
+    print("WARNING: category_taxonomy.json not found. Routing will be less accurate.")
+
+def extract_json_from_text(raw_text):
+    """
+    Strips away conversational filler and markdown backticks from an LLM response,
+    isolating just the JSON object.
+    """
+    try:
+        # Find the index of the first opening brace
+        start_idx = raw_text.find('{')
+        # Find the index of the last closing brace
+        end_idx = raw_text.rfind('}')
+        
+        if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
+            # Slice the string to only include the JSON part
+            clean_json_string = raw_text[start_idx:end_idx + 1]
+            return json.loads(clean_json_string)
+        else:
+            raise ValueError("No JSON structure found in the text.")
+            
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse cleaned JSON: {e}")
+        return None
+
 # --- CORE AI FUNCTIONS ---
 def extract_search_intent(user_query: str):
     """
-    The Query Planner: Breaks a complex user prompt into a list of distinct search intents.
-    Uses the fast Llama 3.1 8B model for millisecond routing.
+    The Query Decomposer: Uses Schema-Grounded Extraction to map user intents 
+    strictly to our existing database taxonomy.
     """
     prompt = f"""
     You are an e-commerce search planner. Analyze this user query: "{user_query}"
     
-    Break the query down into distinct product intents. 
-    For example, if the user asks for "a new laptop and a powerbank", that is TWO intents.
-    If the user asks for "new or used laptops", treat "New Laptops" and "Used Laptops" as TWO separate intents if they are standard retail categories.
+    You MUST map the user's requests strictly to our database's official categories.
     
-    Rules for each intent:
-    1. "primary_category": The main item (e.g., Laptops, Monitors, Powerbanks). Elevate accessories to primary.
-    2. "minor_category": The brand or subtype (e.g., Dell, Gaming). Can be null.
+    OFFICIAL CATEGORIES:
+    {VALID_CATEGORIES}
     
-    Return EXACTLY a JSON object with a single key "intents", which contains a LIST of intent objects.
-    Example output format:
+    1. Break the query down into distinct product requests.
+    2. For each request, write a clean "sub_query".
+    3. Choose the closest matching "primary_category" ONLY from the OFFICIAL CATEGORIES list. Do not invent or guess categories. If nothing matches, use null.
+    
+    Return EXACTLY a JSON object with this structure:
     {{
-      "intents": [
-        {{"primary_category": "Laptops", "minor_category": "Gaming"}},
-        {{"primary_category": "Powerbanks", "minor_category": null}}
+      "items": [
+        {{
+          "sub_query": "gaming laptop",
+          "primary_category": "Laptops"
+        }},
+        {{
+          "sub_query": "gaming headphones",
+          "primary_category": "Headphones"
+        }}
       ]
     }}
     """
     
     try:
         response = client.chat.completions.create(
-            model="accounts/fireworks/models/llama-v3p1-8b-instruct", 
+            # Change this line right here!
+            model="accounts/fireworks/models/mixtral-8x22b-instruct", 
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0, 
-            response_format={"type": "json_object"}
         )
-        parsed_response = json.loads(response.choices[0].message.content.strip())
-        return parsed_response.get("intents", [])
+        
+        # Grab the raw, messy text from the LLM
+        raw_output = response.choices[0].message.content.strip()
+        print(f"--- RAW LLM OUTPUT ---\n{raw_output}\n----------------------")
+        
+        # Clean it using our new function
+        parsed_response = extract_json_from_text(raw_output)
+        
+        if parsed_response:
+            return parsed_response.get("items", [])
+        else:
+            return []
+            
     except Exception as e:
-        print(f"Intent extraction error: {e}")
-        return [] # Return empty list on failure so vector search can fall back to general semantic search
+        print(f"Decomposition error: {e}")
+        return []
+            
+    except Exception as e:
+        print(f"Decomposition error: {e}")
+        return []
 
 def generate_query_vector(text):
     """Turns the user's search text into a 768-dimension vector."""
@@ -89,48 +154,53 @@ def generate_query_vector(text):
     except Exception as e:
         print(f"Embedding error: {e}")
         raise HTTPException(status_code=500, detail="Failed to generate search vector.")
-
+    
 # --- API ENDPOINTS ---
 @app.post("/search")
 def semantic_search(request: SearchQuery):
-    """
-    1. Plans the query (extracts intents).
-    2. Embeds the user query.
-    3. Performs sub-queries for each intent using Hybrid Search (SQL + Vector).
-    4. Combines and returns the top matches.
-    """
-    # 1. Query Planning
-    intents_list = extract_search_intent(request.query)
-    print(f"Extracted Intents: {intents_list}")
+    print("\n" + "="*50)
+    print(f"🔍 1. RAW USER QUERY: {request.query}")
     
-    # Fallback: If the LLM failed or found no specific intent, do one general search
-    if not intents_list:
-        intents_list = [{"primary_category": None, "minor_category": None}]
+    # 1. Decompose the query
+    items_list = extract_search_intent(request.query)
+    
+    print(f"🧠 2. LLM DECOMPOSITION OUTPUT:")
+    print(json.dumps(items_list, indent=2))
+    
+    # Fallback if decomposition fails
+    if not items_list:
+        print("🚨 WARNING: LLM returned empty list! Triggering fallback to full string.")
+        items_list = [{"sub_query": request.query, "primary_category": None}]
         
-    # 2. Embed the text
-    query_vector = generate_query_vector(request.query)
-    
+    print(f"🚀 3. FINAL LIST GOING TO DATABASE LOOP:")
+    print(json.dumps(items_list, indent=2))
+    print("="*50 + "\n")
+        
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    all_formatted_results = []
+    final_results = []
     
-    # Determine how many items to fetch PER category to keep the total around top_k
-    # Ensure we always fetch at least 2 items per intent to give them choices
-    limit_per_intent = max(2, request.top_k // len(intents_list))
+    # Calculate how many to fetch per intent to build a diverse cart
+    limit_per_item = max(2, request.top_k // max(1, len(items_list)))
+    print(f"📊 4. LIMIT PER ITEM: Fetching {limit_per_item} products per sub-query.")
     
     try:
-        # 3. Execute a sub-query for EACH intent
-        for intent in intents_list:
+        # 2. Execute a dedicated search for EACH decomposed item
+        for i, item in enumerate(items_list):
+            print(f"  -> Executing Sub-Query {i+1}: '{item['sub_query']}' (Category: {item.get('primary_category')})")
+            
+            # Generate a clean math vector for THIS specific item only
+            clean_vector = generate_query_vector(item["sub_query"])
+            
             sql = """
                 SELECT title, url, price_pkr, description, 
                        1 - (embedding <=> %s::vector) AS similarity_score
                 FROM products
                 WHERE 1=1 
             """
-            sql_params = [query_vector]
+            sql_params = [clean_vector]
             
-            # Apply hard SQL filters
             if request.min_price is not None:
                 sql += " AND price_pkr >= %s"
                 sql_params.append(request.min_price)
@@ -138,39 +208,28 @@ def semantic_search(request: SearchQuery):
                 sql += " AND price_pkr <= %s"
                 sql_params.append(request.max_price)
                 
-            # Inject the specific intent filters for this iteration
-            if intent.get("primary_category"):
+            if item.get("primary_category"):
                 sql += " AND categories::text ILIKE %s"
-                sql_params.append(f"%{intent['primary_category']}%")
+                sql_params.append(f"%{item['primary_category']}%")
                 
-            if intent.get("minor_category"):
-                sql += " AND (categories::text ILIKE %s OR title ILIKE %s)"
-                sql_params.extend([f"%{intent['minor_category']}%", f"%{intent['minor_category']}%"])
-                
-            # Add ordering and limits
             sql += " ORDER BY embedding <=> %s::vector LIMIT %s;"
-            sql_params.extend([query_vector, limit_per_intent])
+            sql_params.extend([clean_vector, limit_per_item])
             
             cursor.execute(sql, tuple(sql_params))
             results = cursor.fetchall()
+            print(f"     ✅ Found {len(results)} matches for Sub-Query {i+1}")
             
             for row in results:
-                all_formatted_results.append({
+                final_results.append({
                     "title": row[0],
                     "url": row[1],
                     "price": row[2],
                     "description": row[3],
                     "match_score": round(row[4] * 100, 2),
-                    "matched_intent": intent.get("primary_category", "General") # Tag it for the UI
+                    "matched_intent": item.get("primary_category", "General") 
                 })
-                
-        # Optional: Sort the final combined list by match_score to ensure the best stuff is at the top
-        all_formatted_results = sorted(all_formatted_results, key=lambda x: x["match_score"], reverse=True)
-        
-        # Ensure we don't accidentally return 15 items if they asked for 5 intents
-        final_results = all_formatted_results[:max(request.top_k, len(all_formatted_results))]
 
-        return {"query": request.query, "intents_used": intents_list, "results": final_results}
+        return {"query": request.query, "intents_used": items_list, "results": final_results}
         
     except Exception as e:
         print(f"Database error: {e}")
@@ -181,37 +240,40 @@ def semantic_search(request: SearchQuery):
 
 @app.post("/recommend")
 def get_ai_recommendation(request: SearchQuery):
-    """
-    The full RAG endpoint: Retrieves the top database results, then uses Mixtral 
-    to synthesize a final recommendation and align the UI sorting.
-    """
-    # 1. Get the raw database matches
+    # 1. Get the raw database matches and intents
     search_data = semantic_search(request)
     search_results = search_data["results"]
     intents_used = search_data["intents_used"]
     
     if not search_results:
-        return {"recommendation": "I couldn't find any products matching those criteria.", "products": []}
+        return {"explanation": "I couldn't find any products matching those criteria.", "top_picks": [], "alternatives": []}
         
-    # 2. Format the context for the LLM (Notice we add the URL so the LLM has a unique ID)
+    # 2. Extract intent names to tell the LLM exactly what to pick
+    intent_names = [intent.get("primary_category", "General") for intent in intents_used if intent.get("primary_category")]
+    if not intent_names:
+        intent_names = ["Requested Items"]
+        
+    # 3. Format the context for the LLM
     context_string = ""
     for i, p in enumerate(search_results):
-        context_string += f"\n[{i+1}] Title: {p['title']}\nURL: {p['url']}\nPrice: {p['price']} PKR\nDescription: {p['description']}\n"
+        context_string += f"\n[{i+1}] Title: {p['title']}\nCategory: {p['matched_intent']}\nURL: {p['url']}\nPrice: {p['price']} PKR\nDescription: {p['description']}\n"
         
-    # 3. Prompt Mixtral to act as the Sales Assistant AND return JSON
+    # 4. Prompt Mixtral for MULTIPLE picks
     prompt = f"""
     You are an expert e-commerce hardware assistant. 
     A user just searched for: "{request.query}"
     
-    Here are the top products we have in our database that match their search:
+    We identified they are looking for these categories: {intent_names}
+    
+    Here are the top products we have in our database:
     {context_string}
     
-    Based ONLY on these provided products, pick ONE product as the absolute "Top Recommendation". 
-    Write a short, friendly recommendation explaining why it fits their specific search query.
+    For EACH category identified above, pick ONE product as the absolute "Top Recommendation". 
+    Write a short explanation of why you chose this specific combination of items for the user.
     
     You MUST return EXACTLY a JSON object with two keys:
-    1. "recommendation_text": Your conversational advice (1-2 paragraphs).
-    2. "top_pick_url": The exact URL string of the single product you chose as the top recommendation.
+    1. "explanation": Your conversational advice explaining the choices (1-2 paragraphs).
+    2. "top_picks": A JSON list of objects, where each object contains the "category" and the exact "url" of the single best product for that category.
     """
     
     try:
@@ -219,29 +281,38 @@ def get_ai_recommendation(request: SearchQuery):
             model="accounts/fireworks/models/mixtral-8x22b-instruct",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3, 
-            response_format={"type": "json_object"} # Force strict JSON output
+            response_format={"type": "json_object"} 
         )
         parsed_response = json.loads(response.choices[0].message.content.strip())
         
-        recommendation_text = parsed_response.get("recommendation_text", "Here is our top recommendation.")
-        top_pick_url = parsed_response.get("top_pick_url", "")
+        explanation = parsed_response.get("explanation", "Here are our top recommendations.")
+        top_picks_metadata = parsed_response.get("top_picks", [])
         
-        # 4. THE ALIGNMENT FIX: Reorder the array so the AI's choice is always #1
-        chosen_product = next((p for p in search_results if p['url'] == top_pick_url), None)
+        # Extract just the URLs of the winners
+        top_pick_urls = [pick.get("url") for pick in top_picks_metadata]
         
-        if chosen_product:
-            # Remove the AI's chosen product from wherever it is in the list
-            search_results.remove(chosen_product)
-            # Insert it at the very beginning (index 0) so Streamlit makes it the Gold Card
-            search_results.insert(0, chosen_product)
-            # Optional: Add a special flag so you know the AI overrode the math
-            search_results[0]["ai_selected"] = True
+        # 5. Split the payload into Winners and Alternatives
+        top_picks_list = []
+        alternatives_list = []
+        
+        for p in search_results:
+            if p["url"] in top_pick_urls:
+                p["ai_selected"] = True
+                top_picks_list.append(p)
+            else:
+                alternatives_list.append(p)
+                
+        # Safety net: If the LLM glitches and returns no URLs, default to the top math result
+        if not top_picks_list and search_results:
+            top_picks_list.append(search_results[0])
+            alternatives_list = search_results[1:]
         
         return {
             "query": request.query,
             "intents_used": intents_used,
-            "recommendation": recommendation_text,
-            "products": search_results
+            "explanation": explanation,
+            "top_picks": top_picks_list,
+            "alternatives": alternatives_list
         }
     except Exception as e:
         print(f"LLM Synthesis error: {e}")
