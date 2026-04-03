@@ -183,7 +183,7 @@ def semantic_search(request: SearchQuery):
 def get_ai_recommendation(request: SearchQuery):
     """
     The full RAG endpoint: Retrieves the top database results, then uses Mixtral 
-    to synthesize a final, personalized recommendation for the user.
+    to synthesize a final recommendation and align the UI sorting.
     """
     # 1. Get the raw database matches
     search_data = semantic_search(request)
@@ -193,12 +193,12 @@ def get_ai_recommendation(request: SearchQuery):
     if not search_results:
         return {"recommendation": "I couldn't find any products matching those criteria.", "products": []}
         
-    # 2. Format the context for the LLM
+    # 2. Format the context for the LLM (Notice we add the URL so the LLM has a unique ID)
     context_string = ""
     for i, p in enumerate(search_results):
-        context_string += f"\n[{i+1}] {p['title']} - Price: {p['price']} PKR\nDescription: {p['description']}\n"
+        context_string += f"\n[{i+1}] Title: {p['title']}\nURL: {p['url']}\nPrice: {p['price']} PKR\nDescription: {p['description']}\n"
         
-    # 3. Prompt Mixtral to act as the Sales Assistant
+    # 3. Prompt Mixtral to act as the Sales Assistant AND return JSON
     prompt = f"""
     You are an expert e-commerce hardware assistant. 
     A user just searched for: "{request.query}"
@@ -206,10 +206,12 @@ def get_ai_recommendation(request: SearchQuery):
     Here are the top products we have in our database that match their search:
     {context_string}
     
-    Based ONLY on these provided products, write a short, friendly recommendation. 
-    Explicitly pick ONE product as the "Top Recommendation" and explain why it fits their specific search query. 
-    If the user asked for multiple types of items (like a laptop AND a mouse), ensure you recommend a complete setup from the provided products.
-    Keep it concise (1-2 short paragraphs).
+    Based ONLY on these provided products, pick ONE product as the absolute "Top Recommendation". 
+    Write a short, friendly recommendation explaining why it fits their specific search query.
+    
+    You MUST return EXACTLY a JSON object with two keys:
+    1. "recommendation_text": Your conversational advice (1-2 paragraphs).
+    2. "top_pick_url": The exact URL string of the single product you chose as the top recommendation.
     """
     
     try:
@@ -217,9 +219,23 @@ def get_ai_recommendation(request: SearchQuery):
             model="accounts/fireworks/models/mixtral-8x22b-instruct",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3, 
-            max_tokens=300
+            response_format={"type": "json_object"} # Force strict JSON output
         )
-        recommendation_text = response.choices[0].message.content.strip()
+        parsed_response = json.loads(response.choices[0].message.content.strip())
+        
+        recommendation_text = parsed_response.get("recommendation_text", "Here is our top recommendation.")
+        top_pick_url = parsed_response.get("top_pick_url", "")
+        
+        # 4. THE ALIGNMENT FIX: Reorder the array so the AI's choice is always #1
+        chosen_product = next((p for p in search_results if p['url'] == top_pick_url), None)
+        
+        if chosen_product:
+            # Remove the AI's chosen product from wherever it is in the list
+            search_results.remove(chosen_product)
+            # Insert it at the very beginning (index 0) so Streamlit makes it the Gold Card
+            search_results.insert(0, chosen_product)
+            # Optional: Add a special flag so you know the AI overrode the math
+            search_results[0]["ai_selected"] = True
         
         return {
             "query": request.query,
