@@ -71,6 +71,15 @@ The failures above forced resilient design patterns. Here are the core decisions
 * **Decision 5: Hybrid Search API (Solving the LLM Math Problem)**
     * *The Problem:* Vector embeddings map *semantic meaning* (e.g., "cheap", "high-end") but are notoriously terrible at enforcing hard numerical boundaries. Embedding the phrase "under 150000 PKR" will not prevent the vector search from returning a 300,000 PKR laptop if the descriptions are semantically similar.
     * *The Solution:* We implemented **Hybrid Search** in the FastAPI backend. The API receives the user's query and optional price parameters. It dynamically constructs a SQL query that applies hard relational filters (`WHERE price_pkr <= 150000`) *before* it calculates the Cosine Distance (`<=>`). This guarantees mathematical accuracy alongside semantic relevance.
+* **Decision 6: Transition from Single-Vector to Multi-Vector Search**
+    * *The Problem:* Mathematical "Attention Drift." When a user provided a long, multi-item prompt (e.g., "laptop and headphones"), the embedding model averaged the meanings of all words, resulting in a vector that was neither a laptop nor a headphone, often anchoring on the last word processed.
+    * *The Solution:* Implemented **Query Decomposition**. We now use an LLM to break a single complex string into an array of isolated sub-queries. We generate a unique, clean embedding vector for *each* sub-query, ensuring the database search is mathematically focused on one product type at a time.
+* **Decision 7: Robust JSON Extraction (The "Chatty AI" Shield)**
+    * *The Problem:* Smaller LLMs (Llama 8B) often wrap JSON output in conversational filler or Markdown backticks, causing Python's `json.loads()` to crash.
+    * *The Solution:* Developed a regex-like string-slicing utility that identifies the first `{` and last `}` in any LLM response. This "slices" away the noise, making the pipeline resilient to model updates or conversational "chattiness."
+* **Decision 8: Schema-Grounded Taxonomy Mapping**
+    * *The Problem:* LLMs often "hallucinated" categories that didn't exist in our specific database, leading to zero-result SQL filters.
+    * *The Solution:* We now inject the official `category_taxonomy.json` directly into the LLM prompt. The model is strictly forbidden from inventing categories, ensuring the extracted intents always align with our physical database schema.
 
 ## 4. Codebase Reference & Function Dictionary
 
@@ -169,16 +178,16 @@ The final phase moves the fully processed "Gold Standard" JSON data into the pro
 #### Script: `main.py` (The Retrieval API)
 **Purpose:** The user-facing search engine. It intercepts user queries, converts them to math, and executes a Hybrid Search against the Postgres database to return the best products.
 
-* **`SearchQuery(BaseModel)`:** The Pydantic request model. It defines the expected JSON payload, requiring a `query` string, while allowing optional `top_k`, `min_price`, and `max_price` integer filters.
-* **`generate_query_vector(text)`:** Embeds the user's search string (e.g., "fast laptop for coding") into a 768-dimension vector at runtime using the Nomic model.
-* **`semantic_search(request)`:** The core endpoint (`POST /search`) that implements **Hybrid Search**.
-    * *Dynamic SQL Construction:* It initializes a base SQL query. If the user provided `min_price` or `max_price`, it appends raw SQL `WHERE` clauses to the string to filter out products that violate the hard constraints *before* performing vector math.
-    * *Vector Similarity:* Uses the pgvector `<=>` operator to calculate the Cosine Distance between the user's query vector and the database's product vectors. 
-    * *Data Formatting:* Fetches the top `K` results, converts the mathematical distance into a human-readable `match_score` percentage, and returns the structured JSON payload to the user.
+* **`extract_json_from_text(raw_text)`**: A robust utility that isolates JSON objects from conversational LLM noise, ensuring pipeline stability.
+* **`extract_search_intent(user_query)`**: The "Query Decomposer" that breaks complex prompts into a list of distinct intents mapped to official taxonomy.
+* **`semantic_search(request)`**: Executes the "Multi-Search" loop, generating a unique embedding vector for each decomposed item to prevent mathematical attention drift.
+* **`get_ai_recommendation(request)`**: The Synthesis Layer. It reorders database results to align with AI reasoning, ensuring the "Top Pick" cards in the UI match the AI's conversational advice.
 
 ***
 
-## 5. Future Roadmap & Deployment Strategy
+
+
+## 6. Future Roadmap & Deployment Strategy
 
 With the ETL pipeline and vector retrieval engine fully operational, the foundation of the architecture is complete. The next phase of development focuses on synthesizing the retrieved data into natural language, building a user-facing interface, and deploying the system to the cloud using a strict zero-cost architecture.
 
