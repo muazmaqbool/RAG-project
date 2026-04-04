@@ -79,7 +79,7 @@ homepage_url = 'https://alaqsa.com.pk/'
 taxonomy_tree = map_website_taxonomy(homepage_url)
 
 # Let's save this directly to our raw data folder so we don't have to scrape it again!
-output_file = '../data/raw/category_taxonomy.json'
+output_file = 'data/raw/category_taxonomy.json'
 with open(output_file, 'w', encoding='utf-8') as f:
     json.dump(taxonomy_tree, f, indent=4)
 

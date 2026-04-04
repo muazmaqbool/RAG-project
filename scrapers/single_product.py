@@ -16,29 +16,59 @@ def scrape_product_page(url):
 
     soup = BeautifulSoup(response.content, 'html.parser')
     
-    # 1. Exact Selectors based on the Alaqsa HTML structure
+    # 1. Core Elements
     title_element = soup.select_one('h1.product_title')
     price_element = soup.select_one('p.price bdi')
-    desc_element = soup.select_one('div.product-description')
     image_element = soup.select_one('img#wpg-main-img')
 
-    # 2. Extracting the structured specifications table
+    # 2. Enhanced Description Extraction
+    # Fallback to standard WooCommerce containers if the main one fails
+    desc_element = soup.select_one('div.product-description') or soup.select_one('#tab-description') or soup.select_one('.woocommerce-product-details__short-description')
+    
+    # Using separator="\n" prevents tabular text from mashing together into an unreadable string
+    raw_description = desc_element.get_text(separator="\n", strip=True) if desc_element else "Not Found"
+
+    # 3. Enhanced Specification (Tabular Data) Extraction
     specs = {}
+    
+    # Strategy A: Your original specific selector
     spec_rows = soup.select('tr.sts-attr-row')
     for row in spec_rows:
         key_elem = row.select_one('th')
         val_elem = row.select_one('td.value')
         if key_elem and val_elem:
-            # We use .text.strip() to clean off any HTML tags and whitespace
             specs[key_elem.text.strip()] = val_elem.text.strip()
 
-    # 3. Compiling the final JSON payload
+    # Strategy B: The Generic Table Hunter
+    # Looks for tables inside descriptions or standard Woo spec tables
+    additional_tables = soup.select('table.woocommerce-product-attributes, div.product-description table, #tab-description table')
+    
+    for table in additional_tables:
+        for row in table.find_all('tr'):
+            # Check for standard Header/Data pairs
+            th = row.find('th')
+            td = row.find('td')
+            
+            if th and td:
+                key = th.get_text(strip=True)
+                val = td.get_text(separator=" ", strip=True)
+                if key and key not in specs: # Don't overwrite Strategy A if it already worked
+                    specs[key] = val
+            else:
+                # Fallback: Sometimes tables are just built with two standard columns (td and td)
+                tds = row.find_all('td')
+                if len(tds) == 2:
+                    key = tds[0].get_text(strip=True)
+                    val = tds[1].get_text(separator=" ", strip=True)
+                    if key and key not in specs:
+                        specs[key] = val
+
+    # 4. Compiling the final JSON payload
     product_data = {
         "url": url,
         "title": title_element.text.strip() if title_element else "Not Found",
-        # We replace the currency symbol to leave just the clean integer for easier processing later
         "price_pkr": price_element.text.replace('₨', '').strip() if price_element else "Not Found",
-        "description": desc_element.text.strip() if desc_element else "Not Found",
+        "description": raw_description,
         "image_url": image_element.get('src') if image_element else "Not Found",
         "specifications": specs
     }
@@ -46,7 +76,8 @@ def scrape_product_page(url):
     return product_data
 
 # --- TEST IT HERE ---
-test_url = 'https://alaqsa.com.pk/product/dell-latitude-5540-core-i5-13th-gen-8gb-ddr5-512gb-nvme-ssd-15-6-fhd-ips-led-windows-11pro/'
+# Find a URL from your audit that you KNOW has sparse specs but a tabular description on the live site
+test_url = 'https://alaqsa.com.pk/product/hp-elitebook-840-g6-core-i7-8th-gen-16gb-256gb-ssd14-fhd-ips-led/'
 result = scrape_product_page(test_url)
 
 print(json.dumps(result, indent=4))

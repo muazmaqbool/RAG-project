@@ -3,6 +3,7 @@ import json
 import psycopg2
 import re
 import operator
+import difflib
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from openai import OpenAI
@@ -42,8 +43,7 @@ def get_db_connection():
 def load_json_list(filepath, default_msg):
     if os.path.exists(filepath):
         with open(filepath, 'r', encoding='utf-8') as f:
-            # Flatten taxonomy tree if it's the category file
-            if "category" in filepath.lower():
+            if "category_taxonomy" in filepath.lower():
                 data = json.load(f)
                 def extract_names(nodes):
                     names = []
@@ -53,25 +53,28 @@ def load_json_list(filepath, default_msg):
                             names.extend(extract_names(node['subcategories']))
                     return names
                 return list(set(extract_names(data)))
-            else:
-                return json.load(f)
     print(default_msg)
     return []
 
+def load_specs_schema(filepath):
+    if os.path.exists(filepath):
+        with open(filepath, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    print(f"WARNING: {filepath} not found.")
+    return {"master_list": [], "categories": {}}
+
 VALID_CATEGORIES = load_json_list('data/raw/category_taxonomy.json', "WARNING: category_taxonomy.json not found.")
-VALID_SPECS = load_json_list('data/processed/unique_specifications.json', "WARNING: unique_specifications.json not found.")
+SPECS_SCHEMA = load_specs_schema('category_specifications.json')
 
 # --- CORE UTILITIES ---
 def extract_json_from_text(raw_text):
-    """Slices away conversational filler/markdown to isolate the JSON object."""
     try:
         start_idx = raw_text.find('{')
         end_idx = raw_text.rfind('}')
         if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
             return json.loads(raw_text[start_idx:end_idx + 1])
-        raise ValueError("No JSON structure found.")
-    except Exception as e:
-        print(f"JSON Extraction Failed: {e}")
+        return None
+    except Exception:
         return None
 
 def generate_query_vector(text):
@@ -87,10 +90,13 @@ def generate_query_vector(text):
 # --- POST-FILTERING MATH ENGINE ---
 OPS = { "==": operator.eq, ">=": operator.ge, "<=": operator.le, ">": operator.gt, "<": operator.lt }
 
-def evaluate_constraints(product_specs, constraints):
-    """Evaluates numerical LLM constraints against raw product spec strings using Regex."""
+def evaluate_constraints(product_specs, title, description, constraints):
     if not constraints:
         return True 
+
+    # Pre-extract all numbers from the title and description for our Stage 2 fallback
+    full_text = f"{title} {description}".lower()
+    text_numbers = [float(x) for x in re.findall(r"[-+]?\d*\.\d+|\d+", full_text)]
 
     for constraint in constraints:
         trait = constraint.get("trait", "").lower()
@@ -98,56 +104,75 @@ def evaluate_constraints(product_specs, constraints):
         op_str = constraint.get("operator", "==")
         op_func = OPS.get(op_str, operator.eq)
 
-        # 1. Find matching key in the product's actual specs (case-insensitive)
+        # Ensure the LLM gave us a valid number to check against
+        try:
+            req_val = float(req_val)
+        except Exception:
+            continue 
+
+        spec_matched = False
         actual_spec_str = None
+
+        # --- STAGE 1: Strict JSON Specifications Check ---
         if isinstance(product_specs, dict):
+            # 1a. Exact/Substring Match
             for k, v in product_specs.items():
-                if trait in k.lower():
+                if trait in k.lower() or k.lower() in trait:
                     actual_spec_str = str(v)
                     break
+            
+            # 1b. Fuzzy Matching
+            if not actual_spec_str:
+                spec_keys = list(product_specs.keys())
+                fuzzy_matches = difflib.get_close_matches(trait, spec_keys, n=1, cutoff=0.5)
+                if fuzzy_matches:
+                    actual_spec_str = str(product_specs[fuzzy_matches[0]])
 
-        if not actual_spec_str:
-            return False # Product doesn't even have this specification listed
+            if actual_spec_str:
+                matches = re.findall(r"[-+]?\d*\.\d+|\d+", actual_spec_str)
+                if matches:
+                    try:
+                        actual_val = float(matches[0])
+                        if op_func(actual_val, req_val):
+                            spec_matched = True
+                    except Exception:
+                        pass
 
-        # 2. Extract the first valid number from the product's string (e.g., "16 GB" -> 16.0)
-        matches = re.findall(r"[-+]?\d*\.\d+|\d+", actual_spec_str)
-        if not matches:
-            return False 
+        # --- STAGE 2: The Raw Text Fallback ---
+        text_matched = False
+        if not spec_matched:
+            # Check if ANY number extracted from the title/description satisfies the constraint
+            for num in text_numbers:
+                if op_func(num, req_val):
+                    text_matched = True
+                    # Optional: Print statement to watch the fallback in action
+                    # print(f"📝 Text Fallback: Passed constraint '{op_str} {req_val}' using the number '{num}' found in text.")
+                    break
 
-        try:
-            actual_val = float(matches[0])
-            req_val = float(req_val)
-            if not op_func(actual_val, req_val):
-                return False
-        except Exception:
+        # If BOTH the JSON check AND the Text fallback fail, the product fails this constraint
+        if not spec_matched and not text_matched:
             return False
 
     return True
 
-# --- THE ROUTER ---
+# --- AGENT 1: THE PLANNER ---
 def extract_search_intent(user_query: str):
+    """Breaks down the query into distinct items and assigns a core category."""
     prompt = f"""
     You are an e-commerce search planner. Break the query down into distinct product requests.
     
     OFFICIAL CATEGORIES: {VALID_CATEGORIES}
-    VALID SPECIFICATION KEYS: {VALID_SPECS}
     
     For each distinct item the user wants:
-    1. Write a clean "sub_query".
-    2. Pick the closest "primary_category" ONLY from the OFFICIAL CATEGORIES.
-    3. Extract numerical constraints (max 5 per item) using ONLY the VALID SPECIFICATION KEYS for the "trait".
-       - "operator" MUST be one of: ["==", ">=", "<=", ">", "<"]
-       - "value" MUST be a pure number.
+    1. Write a clean "sub_query" describing the item and its requirements.
+    2. Pick the closest "primary_category" ONLY from the OFFICIAL CATEGORIES list.
     
     Return EXACTLY a JSON object:
     {{
       "items": [
         {{
-          "sub_query": "gaming laptop 16gb ram",
-          "primary_category": "Laptops",
-          "constraints": [
-            {{"trait": "Ram", "operator": ">=", "value": 16, "unit": "GB"}}
-          ]
+          "sub_query": "powerbank with 65watt charging",
+          "primary_category": "Power Banks"
         }}
       ]
     }}
@@ -160,35 +185,101 @@ def extract_search_intent(user_query: str):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0
         )
-        raw_output = response.choices[0].message.content.strip()
-        parsed = extract_json_from_text(raw_output)
+        parsed = extract_json_from_text(response.choices[0].message.content.strip())
         return parsed.get("items", []) if parsed else []
     except Exception as e:
-        print(f"Router error: {e}")
+        print(f"Planner error: {e}")
         return [] 
+
+# --- AGENT 2: THE EXECUTOR ---
+def extract_item_constraints(sub_query: str, valid_keys: list):
+    """Extracts numerical specs using ONLY the strictly provided keys for that category."""
+    if not valid_keys:
+        return []
+
+    prompt = f"""
+    You are a strict technical specification extractor.
+    
+    User Request: "{sub_query}"
+    ALLOWED SPECIFICATION KEYS: {valid_keys}
+    
+    Extract numerical constraints (max 5) from the request.
+    FATAL RULES:
+    1. For "trait", you MUST copy the exact string from the ALLOWED SPECIFICATION KEYS list. Do not invent keys.
+    2. "operator" MUST be one of: ["==", ">=", "<=", ">", "<"]
+    3. "value" MUST be a pure number.
+    
+    Return EXACTLY a JSON object:
+    {{
+      "constraints": [
+        {{"trait": "Power Output", "operator": ">=", "value": 65}}
+      ]
+    }}
+    """
+    try:
+        response = client.chat.completions.create(
+            model="accounts/fireworks/models/mixtral-8x22b-instruct", 
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0
+        )
+        parsed = extract_json_from_text(response.choices[0].message.content.strip())
+        
+        # Python Kill-Switch for Hallucinations during Inference
+        constraints = parsed.get("constraints", []) if parsed else []
+        valid_constraints = [c for c in constraints if c.get("trait") in valid_keys]
+        
+        if len(valid_constraints) < len(constraints):
+            print("🛡️ Inference Filter: Blocked a hallucinated constraint key.")
+            
+        return valid_constraints
+    except Exception as e:
+        print(f"Executor error: {e}")
+        return []
 
 # --- API ENDPOINTS ---
 @app.post("/search")
 def semantic_search(request: SearchQuery):
+    # 1. Run The Planner
     items_list = extract_search_intent(request.query)
-    print(f"🧠 Decomposed Intent: {json.dumps(items_list, indent=2)}")
     
     if not items_list:
-        items_list = [{"sub_query": request.query, "primary_category": None, "constraints": []}]
+        items_list = [{"sub_query": request.query, "primary_category": "General", "constraints": []}]
+    
+    # 2. Run The Executor for each planned item
+    for item in items_list:
+        category = item.get("primary_category", "")
+        
+        # Look up the specific keys for this category. Fallback to master list if not found.
+        category_map = SPECS_SCHEMA.get("categories", {})
+        
+        # Try to find an exact or partial match in our category schema
+        valid_keys = []
+        for schema_cat, keys in category_map.items():
+            if category.lower() in schema_cat.lower():
+                valid_keys.extend(keys)
+                
+        valid_keys = list(set(valid_keys))
+        if not valid_keys:
+            valid_keys = SPECS_SCHEMA.get("master_list", [])
+            
+        print(f"🧠 Executor routing '{category}' to {len(valid_keys)} specific keys.")
+        
+        # Fetch constraints using the specific keys
+        item["constraints"] = extract_item_constraints(item["sub_query"], valid_keys)
+        
+    print(f"🎯 Final Structured Intent: {json.dumps(items_list, indent=2)}")
         
     conn = get_db_connection()
     cursor = conn.cursor()
     final_results = []
     
-    # We want a diverse cart, but we OVER-FETCH in SQL so we have items to filter
     limit_per_item = max(2, request.top_k // max(1, len(items_list)))
-    sql_overfetch_limit = 20 
+    sql_overfetch_limit = 50
     
     try:
         for item in items_list:
             clean_vector = generate_query_vector(item["sub_query"])
             
-            # PRE-FILTERING: Notice `is_available = True` and we pull the `specifications` column
             sql = """
                 SELECT title, url, price_pkr, description, 
                        1 - (embedding <=> %s::vector) AS similarity_score,
@@ -205,7 +296,7 @@ def semantic_search(request: SearchQuery):
                 sql += " AND price_pkr <= %s"
                 sql_params.append(request.max_price)
                 
-            if item.get("primary_category"):
+            if item.get("primary_category") and item.get("primary_category") != "General":
                 sql += " AND categories::text ILIKE %s"
                 sql_params.append(f"%{item['primary_category']}%")
                 
@@ -215,7 +306,6 @@ def semantic_search(request: SearchQuery):
             cursor.execute(sql, tuple(sql_params))
             raw_db_results = cursor.fetchall()
             
-            # POST-FILTERING
             passed_items = []
             failed_items = []
             
@@ -226,13 +316,11 @@ def semantic_search(request: SearchQuery):
                     "specifications": row[5], "matched_intent": item.get("primary_category", "General")
                 }
                 
-                # Run it through the regex math engine
-                if evaluate_constraints(row[5], item.get("constraints", [])):
+                if evaluate_constraints(row[5], row[0], row[3], item.get("constraints", [])):
                     passed_items.append(product_data)
                 else:
                     failed_items.append(product_data)
             
-            # THE GRACEFUL DEGRADATION LOGIC
             constraints_met = True
             if passed_items:
                 winners = passed_items[:limit_per_item]
@@ -252,6 +340,8 @@ def semantic_search(request: SearchQuery):
     finally:
         cursor.close()
         conn.close()
+
+# ... (Keep your /recommend endpoint the exact same as before!)
 
 @app.post("/recommend")
 def get_ai_recommendation(request: SearchQuery):

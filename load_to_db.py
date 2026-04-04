@@ -19,7 +19,7 @@ DB_PARAMS = {
     "port": "5432"
 }
 
-ENRICHED_FILE = 'data/processed/enriched_dataset.json'
+ENRICHED_FILE = 'data/processed/enriched_dataset_patched.json'
 
 def get_db_connection():
     """Connects to Postgres and enables vector math support."""

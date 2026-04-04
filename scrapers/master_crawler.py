@@ -21,7 +21,6 @@ def scrape_product_data(url, category_paths):
     }
 
     try:
-        # Increased timeout to 15 seconds to handle spotty internet
         response = requests.get(url, headers=headers, timeout=15)
         
         if response.status_code == 404:
@@ -31,18 +30,24 @@ def scrape_product_data(url, category_paths):
         response.raise_for_status()
         
     except requests.RequestException as e:
-        # CRITICAL: If the internet drops, we return None. 
-        # This ensures the item is NOT saved, so it will be retried next time.
         print(f"  [!] Connection Error for {url}: {e}")
         return None 
 
     soup = BeautifulSoup(response.content, 'html.parser')
     
+    # --- 1. Core Elements ---
     title_elem = soup.select_one('h1.product_title')
     price_elem = soup.select_one('p.price bdi')
-    desc_elem = soup.select_one('div.product-description')
+    image_elem = soup.select_one('img#wpg-main-img')
     
+    # --- 2. Enhanced Description Extraction ---
+    desc_elem = soup.select_one('div.product-description') or soup.select_one('#tab-description') or soup.select_one('.woocommerce-product-details__short-description')
+    raw_description = desc_elem.get_text(separator="\n", strip=True) if desc_elem else ""
+
+    # --- 3. Enhanced Specification (Tabular Data) Extraction ---
     specs = {}
+    
+    # Strategy A: Original explicit rows
     spec_rows = soup.select('tr.sts-attr-row')
     if spec_rows:
         for row in spec_rows:
@@ -51,6 +56,27 @@ def scrape_product_data(url, category_paths):
             if key_elem and val_elem:
                 specs[key_elem.text.strip()] = val_elem.text.strip()
 
+    # Strategy B: Generic Table Hunter
+    additional_tables = soup.select('table.woocommerce-product-attributes, div.product-description table, #tab-description table')
+    for table in additional_tables:
+        for row in table.find_all('tr'):
+            th = row.find('th')
+            td = row.find('td')
+            
+            if th and td:
+                key = th.get_text(strip=True)
+                val = td.get_text(separator=" ", strip=True)
+                if key and key not in specs:
+                    specs[key] = val
+            else:
+                tds = row.find_all('td')
+                if len(tds) == 2:
+                    key = tds[0].get_text(strip=True)
+                    val = tds[1].get_text(separator=" ", strip=True)
+                    if key and key not in specs:
+                        specs[key] = val
+
+    # --- 4. Price Parsing ---
     price_text = price_elem.text.lower() if price_elem else ""
     pricing_data = {"amount_pkr": None, "is_call_for_price": False}
     
@@ -67,14 +93,16 @@ def scrape_product_data(url, category_paths):
         else:
             pricing_data["is_call_for_price"] = True
 
+    # --- 5. Final Assembly ---
     product_data = {
         "url": url,
         "title": title_elem.text.strip() if title_elem else "Unknown",
         "is_available": True,
         "pricing": pricing_data,
-        "description": desc_elem.text.strip() if desc_elem else "",
+        "description": raw_description,
         "categories": category_paths,
-        "specifications": specs
+        "specifications": specs,
+        "image_url": image_elem.get('src') if image_elem else None
     }
 
     return product_data
@@ -97,7 +125,6 @@ if __name__ == "__main__":
         with open(output_file, 'r', encoding='utf-8') as f:
             try:
                 final_dataset = json.load(f)
-                # Create a fast-lookup set of URLs we already successfully processed
                 scraped_urls = {item['url'] for item in final_dataset}
                 print(f"Resuming from item {len(scraped_urls)}...")
             except json.JSONDecodeError:
@@ -109,7 +136,6 @@ if __name__ == "__main__":
     for url, categories in url_dict.items():
         count += 1
         
-        # Skip if we already scraped it in a previous run
         if url in scraped_urls:
             continue
             
@@ -117,13 +143,11 @@ if __name__ == "__main__":
         
         data = scrape_product_data(url, categories)
         
-        # If data is None, an internet error occurred. We skip saving so it retries later.
         if data:
             final_dataset.append(data)
             scraped_urls.add(url)
             new_items_this_run += 1
             
-            # Save progress frequently (every 10 successful items) to protect against drops
             if new_items_this_run % 10 == 0:
                 with open(output_file, 'w', encoding='utf-8') as f:
                     json.dump(final_dataset, f, indent=4)
@@ -131,7 +155,6 @@ if __name__ == "__main__":
                 
         time.sleep(0.5) 
 
-    # Final Save when the loop finishes
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(final_dataset, f, indent=4)
         
