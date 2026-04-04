@@ -18,20 +18,30 @@ client = OpenAI(
     api_key=FIREWORKS_API_KEY,
 )
 
-def draft_missing_description(specs_dict):
-    """Uses Llama 3.1 8B on Fireworks to generate professional e-commerce copy."""
+def draft_missing_description(specs_dict, title):
+    """Uses Mixtral on Fireworks to generate highly searchable e-commerce copy."""
     prompt = f"""
-    You are an e-commerce expert. Turn these raw specifications into a well-written, 
-    4-sentence product description focusing on the practical performance traits and 
-    advantages for the buyer. Do not invent any technical features not listed here.
+    You are an expert e-commerce SEO copywriter. 
+    I will provide the title and technical specifications of a hardware product.
     
+    Product Title: {title}
     Specs: {json.dumps(specs_dict)}
+    
+    Your task is to write a well-crafted, 4-sentence product description.
+    
+    FATAL RULES:
+    1. Do NOT invent any technical features (RAM, Storage, GPU, etc.) not explicitly listed in the specs.
+    2. You MUST analyze the specs and explicitly categorize the product's tier and use-case by naturally weaving in at least 3 of these strategic keywords into your paragraph:
+       - Tiers: [Budget, Mid-Range, Premium, High-End, Flagship]
+       - Use-Cases: [Gaming, Professional, Office, Student, Content Creation, 3D Rendering, Everyday Use]
+       
+    Make it sound like natural marketing copy, but ensure those intent keywords are present so our semantic search engine can easily index it.
     """
     
     response = client.chat.completions.create(
-        model="accounts/fireworks/models/mixtral-8x22b-instruct", # The MoE Upgrade!
+        model="accounts/fireworks/models/mixtral-8x22b-instruct", 
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3, 
+        temperature=0.3, # Keep it low so it doesn't hallucinate specs
         max_tokens=150
     )
     return response.choices[0].message.content.strip()
@@ -81,7 +91,7 @@ def run_enrichment():
         if word_count < 50 and has_specs:
             print(f"  -> Weak Description ({word_count} words). Llama 3.1 is drafting copy...")
             try:
-                final_desc = draft_missing_description(item['specifications'])
+                final_desc = draft_missing_description(item['specifications'], item['title'])
                 item['description'] = final_desc
             except Exception as e:
                 print(f"  [!] Failed to generate description: {e}")

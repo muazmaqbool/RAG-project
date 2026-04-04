@@ -108,8 +108,8 @@ def scrape_product_data(url, category_paths):
     return product_data
 
 if __name__ == "__main__":
-    input_file = '../data/raw/master_product_urls.json'
-    output_file = '../data/raw/final_scraped_dataset.json'
+    input_file = 'data/raw/master_product_urls.json'
+    output_file = 'data/raw/final_scraped_dataset.json'
     
     print("Loading Master URLs...")
     with open(input_file, 'r', encoding='utf-8') as f:

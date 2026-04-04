@@ -30,9 +30,9 @@ def search_web_for_product(product_title, brand):
         return "No web results found."
 
 def hunt_ghost_data(product_title, search_context):
-    """Uses Mixtral to extract specs and write a description based on web context."""
+    """Uses Mixtral to extract specs and write an SEO-optimized description based on web context."""
     prompt = f"""
-    You are an e-commerce data engineer.
+    You are an e-commerce data engineer and expert SEO copywriter specializing in tech accessories and peripherals.
     Product Title: "{product_title}"
     
     Web Search Context:
@@ -43,14 +43,19 @@ def hunt_ghost_data(product_title, search_context):
     1. "description": A 4-sentence professional description of its features.
     2. "specifications": A dictionary of 3 to 5 key technical specifications (e.g., {{"Interface": "USB 3.0"}}).
     
+    FATAL RULES FOR DESCRIPTION:
+    You MUST analyze the context and explicitly categorize the product by naturally weaving in at least 3 of these strategic keywords into your description to help our search engine:
+    - Quality/Form Factor Tiers: [Value, Standard, Premium, Heavy-Duty, Compact, Portable, High-Capacity]
+    - Use-Cases: [Travel/On-the-Go, Home Office, Mobile Devices, Desk Setup, Gaming, Everyday Charging, Professional]
+    
     If the context is insufficient to determine what the product is, return {{"description": "Not found", "specifications": {{}}}}.
     """
     
     response = client.chat.completions.create(
         model="accounts/fireworks/models/mixtral-8x22b-instruct",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.1, # Very low temp to prevent hallucinating outside the search context
-        response_format={"type": "json_object"} # Forces strict JSON output
+        temperature=0.1, 
+        response_format={"type": "json_object"} 
     )
     
     return json.loads(response.choices[0].message.content.strip())
