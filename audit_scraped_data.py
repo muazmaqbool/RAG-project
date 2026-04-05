@@ -2,7 +2,7 @@ import json
 import os
 
 # Point this to the raw output of your master_crawler.py
-DATASET_FILE = 'data/raw/final_scraped_dataset.json'
+DATASET_FILE = 'data/processed/enriched_dataset.json'
 
 def get_core_category(raw_cats):
     """Reusing your core category extraction logic to group stats accurately."""
