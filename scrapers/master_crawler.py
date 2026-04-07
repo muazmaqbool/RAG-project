@@ -78,11 +78,16 @@ def scrape_product_data(url, category_paths):
     # --- 4. Price Parsing (Flattened Schema) ---
     price_text = price_elem.text.lower() if price_elem else ""
     final_price = None
+    is_call = False # <--- NEW: Explicitly track the flag
     
-    if "call" not in price_text and price_text:
+    if "call" in price_text or not price_text:
+        is_call = True
+    else:
         cleaned_price = "".join(filter(str.isdigit, price_text))
         if cleaned_price and int(cleaned_price) > 0:
             final_price = int(cleaned_price)
+        else:
+            is_call = True
 
     # --- 5. Final Assembly ---
     product_data = {
@@ -90,6 +95,7 @@ def scrape_product_data(url, category_paths):
         "title": title_elem.text.strip() if title_elem else "Unknown",
         "is_available": True,
         "price": final_price,
+        "is_call_for_price": is_call, # <--- NEW: Save it to the raw JSON
         "description": raw_description,
         "categories": category_paths,
         "specifications": specs,

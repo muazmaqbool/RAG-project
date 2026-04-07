@@ -56,14 +56,7 @@
         "weight_g": "Integer. Extract weight in grams.",
         "warranty": "String. Extract warranty details."
     },
-    "Smartwatches": {
-        "brand": "String. Extract the brand name.",
-        "screen_size_inches": "Float. Screen size in inches.",
-        "battery_capacity_mah": "Integer. Battery capacity in mAh.",
-        "has_calling": "Boolean. True if it supports Bluetooth calling.",
-        "is_waterproof": "Boolean. True if it explicitly mentions IP rating or waterproof."
-    },
-    "Data Cables": {
+    "Mobile Data Cables": {
         "brand": "String. Extract the brand name.",
         "model": "String. Extract the specific model number.",
         "connector_in": "String. Extract the input connector type (e.g., USB-A, USB-C).",
@@ -156,7 +149,7 @@
         "driver_size_mm": "Float. Extract the speaker/driver unit diameter in millimeters.",
         "has_microphone": "Boolean. True if it includes a built-in microphone."
     },
-    "Laptop Stands & Cooling Pads": {
+    "Laptop Stands , Cooling Pads": {
         "brand": "String. Extract the brand name.",
         "model": "String. Extract the specific model number.",
         "max_laptop_size_inches": "Float. Extract the maximum supported laptop size in inches.",
@@ -226,7 +219,7 @@
         "is_smart_device": "Boolean. True if Wi-Fi, App control, or Voice control (Alexa/Google) is explicitly mentioned.",
         "has_surge_protection": "Boolean. True if surge, overload, or lightning protection is mentioned."
     },
-    "Mobile Holders": {
+    "Mobile Holder": {
         "brand": "String. Extract the brand name.",
         "model": "String. Extract the specific model number.",
         "holder_type": "String. Classify into ONE of: [Car Mount, Desk Stand, Bike/Motorcycle Mount, Tripod/Selfie Stick, Ring/Pop Socket].",
@@ -309,14 +302,14 @@
         "brand": "String. Extract the brand name.",
         "model": "String. Extract the specific model number.",
         "capacity_mah": "Integer. Highest advertised capacity in mAh.",
-        "max_input_w": "Float. Extract ONLY the max input wattage. Do NOT confuse with output.",
-        "max_output_w": "Float. Extract ONLY the max output wattage. IF given in Volts and Amps, calculate V * A = W. Do NOT confuse with input.",
+        "max_input_w": "Float. Extract ONLY the max input wattage. Do NOT confuse with output. It should almost always be given under input in specs along with voltage and ampere values. Ignore those and extract the power provided",
+        "max_output_w": "Float. Extract ONLY the max output wattage. It should almost always be given under input in specs along with voltage and ampere values. Ignore those and extract the power provided. Do NOT confuse with input.",
         "total_ports": "Integer. Total number of charging output ports (USB-A + USB-C).",
         "has_wireless_charging": "Boolean. True if it supports magnetic or wireless charging.",
         "has_built_in_cable": "Boolean. True if it has built-in charging cables.",
         "is_solar_powered": "Boolean. True if it features solar charging panels."
     },
-    "Tripods & Selfie Sticks": {
+    "Tripod Stand/Selfi Stick": {
         "brand": "String. Extract the brand name.",
         "model": "String. Extract the specific model number.",
         "device_type": "String. Classify into ONE of: [Tripod, Selfie Stick, Gimbal/Stabilizer, Vlogging Kit].",
@@ -374,7 +367,7 @@
         "material": "String. Extract the primary build material (e.g., Polyester, Nylon, Leather, Neoprene).",
         "is_water_resistant": "Boolean. True if it explicitly mentions being waterproof, water-resistant, or splash-proof."
     },
-    "SSDs": {
+    "SSD": {
         "brand": "String. Extract the brand name.",
         "model": "String. Extract the specific model number.",
         "storage_gb": "Integer. Total storage capacity in GB (Convert TB to GB, e.g., 1TB = 1024, 2TB = 2048).",
@@ -405,7 +398,7 @@
         "number_of_shortcut_keys": "Integer. Total number of customizable express/shortcut keys/buttons.",
         "includes_pen": "Boolean. True if a stylus/pen is included in the box."
     },
-    "Smart Watches & Bands": {
+    "Smart Watches and Bands": {
         "brand": "String. Extract the brand name.",
         "model": "String. Extract the specific model number.",
         "device_type": "String. Classify into ONE of: [Smartwatch, Fitness Band/Tracker].",
@@ -419,7 +412,7 @@
         "has_spo2_monitor": "Boolean. True if it explicitly tracks Blood Oxygen / SpO2.",
         "is_waterproof": "Boolean. True if it explicitly mentions an IP rating or ATM water resistance (e.g., IP68, 5ATM)."
     },
-    "Gaming Sticks": {
+    "Gaming Stick": {
         "brand": "String. Extract the brand name.",
         "model": "String. Extract the specific model number.",
         "number_of_built_in_games": "Integer. Total number of pre-installed games (e.g., 10000).",

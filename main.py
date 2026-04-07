@@ -5,12 +5,13 @@ import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from openai import OpenAI
+from openai import AsyncOpenAI  # <--- UPGRADED
 from dotenv import load_dotenv
 
 load_dotenv()
 
-client = OpenAI(
+# --- UPGRADED: Using AsyncOpenAI natively ---
+client = AsyncOpenAI(
     base_url="https://api.fireworks.ai/inference/v1",
     api_key=os.getenv("FIREWORKS_API_KEY"),
 )
@@ -42,7 +43,6 @@ def get_db_connection():
 
 # --- CORE UTILITIES ---
 def extract_json_from_text(raw_text):
-    """Safely extracts JSON even if the LLM wraps it in markdown code blocks."""
     try:
         start_idx = raw_text.find('{')
         end_idx = raw_text.rfind('}')
@@ -52,13 +52,23 @@ def extract_json_from_text(raw_text):
         print(f"JSON Parsing Error: {e}")
     return {}
 
+# --- NEW: NATIVE ASYNC RETRY WRAPPER ---
+async def safe_api_call(coro_func, max_retries=4):
+    """Wraps an async API call with exponential backoff to defeat 429 Rate Limits."""
+    for attempt in range(max_retries):
+        try:
+            return await coro_func()
+        except Exception as e:
+            print(f"⚠️ API Error (Attempt {attempt+1}/{max_retries}): {e}")
+            if attempt == max_retries - 1:
+                return None
+            await asyncio.sleep(2 ** attempt) # Waits 1s, 2s, 4s to naturally stagger bursts
+
 async def generate_vector(text):
-    loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(None, lambda: client.embeddings.create(
-        model="nomic-ai/nomic-embed-text-v1.5",
-        input=text
-    ))
-    return response.data[0].embedding
+    async def call():
+        return await client.embeddings.create(model="nomic-ai/nomic-embed-text-v1.5", input=text)
+    res = await safe_api_call(call)
+    return res.data[0].embedding if res else None
 
 # --- STAGE 1: THE PLANNER ---
 async def plan_search_intents(user_query: str):
@@ -69,12 +79,15 @@ async def plan_search_intents(user_query: str):
     Return JSON: {{ "items": [ {{ "sub_query": "...", "category": "..." }} ] }}
     Query: "{user_query}"
     """
-    loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
-        model="accounts/fireworks/models/mixtral-8x22b-instruct",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0
-    ))
+    async def call():
+        return await client.chat.completions.create(
+            model="accounts/fireworks/models/mixtral-8x22b-instruct",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0
+        )
+    
+    response = await safe_api_call(call)
+    if not response: return []
     
     content = response.choices[0].message.content
     parsed = extract_json_from_text(content)
@@ -85,6 +98,11 @@ async def execute_sub_query(item, request_params, limit):
     sub_query = item['sub_query']
     category = item['category']
     vector = await generate_vector(sub_query)
+    
+    if not vector:
+        print(f"❌ Failed to generate vector for {sub_query}")
+        return []
+        
     category_schema = MASTER_SCHEMAS.get(category, MASTER_SCHEMAS["General"])
     
     filter_prompt = f"""
@@ -103,15 +121,15 @@ async def execute_sub_query(item, request_params, limit):
 
     Return EXACTLY a JSON object.
     """
-    loop = asyncio.get_event_loop()
-    filter_res = await loop.run_in_executor(None, lambda: client.chat.completions.create(
-        model="accounts/fireworks/models/mixtral-8x22b-instruct",
-        messages=[{"role": "user", "content": filter_prompt}],
-        temperature=0.0
-    ))
-    
-    content = filter_res.choices[0].message.content
-    spec_filters = extract_json_from_text(content)
+    async def call():
+        return await client.chat.completions.create(
+            model="accounts/fireworks/models/mixtral-8x22b-instruct",
+            messages=[{"role": "user", "content": filter_prompt}],
+            temperature=0.0
+        )
+        
+    filter_res = await safe_api_call(call)
+    spec_filters = extract_json_from_text(filter_res.choices[0].message.content) if filter_res else {}
     print(f"🔍 DEBUG: Generated Filters for {category}: {spec_filters}")
 
     conn = get_db_connection()
@@ -135,7 +153,7 @@ async def execute_sub_query(item, request_params, limit):
         # Apply Strict JSONB filters
         spec_conditions = []
         for key, value in spec_filters.items():
-            spec_conditions.append("search_specs @> %s")
+            spec_conditions.append("search_specs @> %s::jsonb") # <--- Added ::jsonb cast
             params.append(json.dumps({key: value}))
         
         final_sql = sql + (" AND " + " AND ".join(spec_conditions) if spec_conditions else "")
@@ -145,7 +163,10 @@ async def execute_sub_query(item, request_params, limit):
         rows = cursor.fetchall()
 
         # SOFT FALLBACK: Strip spec filters but keep vector + category + price
+        is_fallback = False  # <--- NEW: Track if fallback triggers
+        
         if not rows and spec_conditions:
+            is_fallback = True  # <--- NEW: Flag it
             print(f"⚠️ Soft-filter: No exact match for {spec_filters}. Retrying with vector only.")
             base_params = params[:len(params)-len(spec_conditions)]
             cursor.execute(sql + " ORDER BY score DESC LIMIT %s", base_params + [limit])
@@ -161,7 +182,8 @@ async def execute_sub_query(item, request_params, limit):
                 "description": row.get('description', ''),
                 "display_specs": row.get('display_specs', {}),
                 "match_score": round(row.get('score', 0) * 100, 2),
-                "matched_intent": category
+                "matched_intent": category,
+                "is_exact_match": bool(spec_conditions) and not is_fallback # <--- NEW: Flag exact matches
             })
         return results
 
@@ -175,15 +197,30 @@ async def semantic_search(request: SearchQuery):
     intents = await plan_search_intents(request.query)
     if not intents: intents = [{"sub_query": request.query, "category": "General"}]
     
-    # Let each intent fetch the FULL top_k amount to ensure a rich candidate pool
+    # 1. Fetch results for each intent
     tasks = [execute_sub_query(intent, request, request.top_k) for intent in intents]
-    all_results = await asyncio.gather(*tasks)
+    all_results = await asyncio.gather(*tasks) # This is a List of Lists
     
-    flattened = [item for sublist in all_results for item in sublist]
+    # 2. Sort each sub-list individually (Exact Matches first, then Vector Score)
+    for sublist in all_results:
+        sublist.sort(key=lambda x: (x.get('is_exact_match', False), x['match_score']), reverse=True)
     
-    # Sort the combined pool by match_score and slice the absolute best top_k
-    flattened.sort(key=lambda x: x['match_score'], reverse=True)
-    return {"query": request.query, "results": flattened[:request.top_k]}
+    # 3. The "Round-Robin" Zipper Merge
+    final_results = []
+    max_len = max((len(sublist) for sublist in all_results), default=0)
+    
+    for i in range(max_len):
+        for sublist in all_results:
+            if i < len(sublist):
+                final_results.append(sublist[i])
+                
+            # Stop the moment we hit the user's requested limit
+            if len(final_results) >= request.top_k:
+                break
+        if len(final_results) >= request.top_k:
+            break
+            
+    return {"query": request.query, "results": final_results}
 
 @app.post("/recommend")
 async def get_ai_recommendation(request: SearchQuery):
@@ -193,7 +230,6 @@ async def get_ai_recommendation(request: SearchQuery):
 
     context = ""
     for i, r in enumerate(results):
-        # We MUST include the URL here so the LLM knows what to return
         context += f"[{i+1}] Title: {r['title']} | URL: {r['url']} | Price: {r['price']} | Specs: {json.dumps(r['display_specs'])}\n"
 
     prompt = f"""
@@ -203,18 +239,24 @@ async def get_ai_recommendation(request: SearchQuery):
     Pick the absolute best match(es) for the user's intent. Explain why using the specs. 
     Return JSON: {{ "explanation": "...", "top_picks": [ {{ "url": "exact_url_from_context", "reason": "..." }} ] }}
     """
-    loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(None, lambda: client.chat.completions.create(
-        model="accounts/fireworks/models/mixtral-8x22b-instruct",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2
-    ))
     
+    async def call():
+        return await client.chat.completions.create(
+            model="accounts/fireworks/models/mixtral-8x22b-instruct",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2
+        )
+        
+    response = await safe_api_call(call)
+    
+    if not response:
+        # Fallback if API fails completely: Return results without AI reasoning
+        return {"explanation": "Server load is high, but here are the best database matches:", "top_picks": [results[0]], "alternatives": results[1:]}
+        
     content = response.choices[0].message.content
     parsed = extract_json_from_text(content)
     
     top_urls = [p.get("url") for p in parsed.get("top_picks", [])]
-    
     top_picks_list = []
     alternatives_list = []
     
@@ -226,7 +268,6 @@ async def get_ai_recommendation(request: SearchQuery):
             r['ai_selected'] = False
             alternatives_list.append(r)
             
-    # Safety net: if LLM fails to match URLs properly, default to highest score
     if not top_picks_list and results:
         results[0]['ai_selected'] = True
         top_picks_list.append(results[0])

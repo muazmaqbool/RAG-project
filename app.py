@@ -33,7 +33,7 @@ if st.button("Search Inventory", type="primary"):
             # Prepare the JSON payload for FastAPI
             payload = {
                 "query": user_query,
-                "top_k": 5,
+                "top_k": 10,
                 "min_price": min_price,
                 "max_price": max_price
             }

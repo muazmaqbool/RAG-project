@@ -3,6 +3,7 @@ venv/
 env/
 .env
 utils/
+old_documentation.md
 
 # Python artifacts
 __pycache__/

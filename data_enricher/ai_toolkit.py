@@ -39,7 +39,7 @@ def generate_vector(text_chunk, max_retries=3):
             print(f"      ⚠️ Embedding API Error (Attempt {attempt+1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
                 return None
-            time.sleep(2 ** attempt) # Waits 1s, then 2s, then gives up
+            time.sleep(2) # Waits 1s, then 2s, then gives up
 
 # ==========================================
 # TOOL 1: THE COPYWRITER
@@ -60,7 +60,7 @@ def draft_missing_description(specs_dict, title, max_retries=3):
             response = client.chat.completions.create(
                 model="accounts/fireworks/models/mixtral-8x22b-instruct", 
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3, 
+                temperature=0.3,
                 max_tokens=150
             )
             return response.choices[0].message.content.strip()
@@ -68,7 +68,7 @@ def draft_missing_description(specs_dict, title, max_retries=3):
             print(f"      ⚠️ Copywriter API Error (Attempt {attempt+1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
                 return ""
-            time.sleep(2 ** attempt)
+            time.sleep(2)
 
 # ==========================================
 # TOOL 2: THE GHOST HUNTER
@@ -85,7 +85,7 @@ def search_web_for_product(product_title, brand, max_retries=3):
             print(f"      ⚠️ DuckDuckGo Error (Attempt {attempt+1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
                 return "No web results found."
-            time.sleep(2 ** attempt)
+            time.sleep(2)
 
 def hunt_ghost_data(product_title, search_context, max_retries=3):
     prompt = f"""
@@ -111,48 +111,36 @@ def hunt_ghost_data(product_title, search_context, max_retries=3):
             print(f"      ⚠️ Ghost Hunter API Error (Attempt {attempt+1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
                 return {"description": "Not found", "specifications": {}}
-            time.sleep(2 ** attempt)
+            time.sleep(2)
 
 # ==========================================
 # TOOL 3: THE SCHEMA ROUTER
 # ==========================================
 
-def determine_schema(category_path, schemas_dict):
-    cat_lower = str(category_path).lower()
-    if "laptop stand" in cat_lower or "cooling pad" in cat_lower: return schemas_dict.get("Laptop Stands & Cooling Pads", {})
-    if "laptop" in cat_lower: return schemas_dict.get("Laptops", {})
-    if "power bank" in cat_lower: return schemas_dict.get("Power Banks", {})
-    if "watch" in cat_lower or "band" in cat_lower: return schemas_dict.get("Smartwatches", {}) 
-    if "charger" in cat_lower or "adapter" in cat_lower: return schemas_dict.get("Chargers", {})
-    if "data cable" in cat_lower: return schemas_dict.get("Data Cables", {})
-    if "multifunction" in cat_lower or "hub" in cat_lower: return schemas_dict.get("Multifunction Adapters", {})
-    if "convertor" in cat_lower: return schemas_dict.get("Convertors", {})
-    if "bluetooth handsfree" in cat_lower: return schemas_dict.get("Bluetooth Handsfree", {})
-    if "stereo handsfree" in cat_lower: return schemas_dict.get("Stereo Handsfree", {})
-    if "ring light" in cat_lower: return schemas_dict.get("Ring Lights", {})
-    if "gaming" in cat_lower: return schemas_dict.get("Gaming Accessories", {})
-    if "mix gadget" in cat_lower: return schemas_dict.get("Mix Gadgets", {})
-    if "keyboard" in cat_lower or "mouse" in cat_lower: return schemas_dict.get("Keyboards and Mouse", {})
-    if "speaker" in cat_lower or "headphone" in cat_lower: return schemas_dict.get("Speakers and Headphones", {})
-    if "extension lead" in cat_lower or "smart switch" in cat_lower: return schemas_dict.get("Extension Leads & Smart Switches", {})
-    if "mobile holder" in cat_lower: return schemas_dict.get("Mobile Holders", {})
-    if "hub" in cat_lower or "dock" in cat_lower: return schemas_dict.get("Multifunction Hubs & Docks", {})
-    if "usb card" in cat_lower or "usb device" in cat_lower: return schemas_dict.get("USB Cards & Devices", {})
-    if "card reader" in cat_lower: return schemas_dict.get("Card Readers", {})
-    if "android box" in cat_lower or "screen mirror" in cat_lower: return schemas_dict.get("Android BOX & Screen Mirror", {})
-    if "recording" in cat_lower or "presenter" in cat_lower: return schemas_dict.get("Recording Accessories", {})
-    if "usb hub" in cat_lower: return schemas_dict.get("USB Hubs", {})
-    if "tripod" in cat_lower or "selfi" in cat_lower: return schemas_dict.get("Tripods & Selfie Sticks", {})
-    if "network adapter" in cat_lower: return schemas_dict.get("Network Adapters & Accessories", {})
-    if "projector" in cat_lower: return schemas_dict.get("Smart Projectors", {})
-    if "enclosure" in cat_lower: return schemas_dict.get("External Enclosures", {})
-    if "laptop bag" in cat_lower: return schemas_dict.get("Laptop Bags", {})
-    if "ssd" in cat_lower: return schemas_dict.get("SSDs", {})
-    if "software" in cat_lower: return schemas_dict.get("Softwares", {})
-    if "graphic tablet" in cat_lower or "drawing tablet" in cat_lower: return schemas_dict.get("Graphic Tablets", {})
-    if "gaming stick" in cat_lower: return schemas_dict.get("Gaming Sticks", {})
-    if "camera" in cat_lower: return schemas_dict.get("Smart Cameras", {})
-    if "batteries" in cat_lower or "battery" in cat_lower: return schemas_dict.get("Batteries", {})
+def determine_schema(cat_string, schemas_dict):
+    """
+    Dynamically maps the database category string to the JSON schema.
+    """
+    if not cat_string:
+        return schemas_dict.get("General", {})
+        
+    cat_lower = cat_string.lower()
+    
+    # 1. Custom Consolidations (Multi-to-One)
+    if "laptop" in cat_lower and "bag" not in cat_lower and "stand" not in cat_lower and "cooling" not in cat_lower:
+        return schemas_dict.get("Laptops", {})
+    if "charger" in cat_lower:
+        return schemas_dict.get("Chargers", {})
+        
+    # 2. Dynamic Schema Key Matching
+    for schema_key in schemas_dict.keys():
+        if schema_key == "General":
+            continue
+        # Check if the exact schema name (lowercased) exists anywhere in the giant category string
+        if schema_key.lower() in cat_lower:
+            return schemas_dict.get(schema_key)
+            
+    # Fallback safety net
     return schemas_dict.get("General", {})
 
 # ==========================================
@@ -184,4 +172,4 @@ def extract_search_specs(title, description, raw_specs, target_schema, max_retri
             print(f"      ⚠️ Spec Extraction Error (Attempt {attempt+1}/{max_retries}): {e}")
             if attempt == max_retries - 1:
                 return {}
-            time.sleep(2 ** attempt)
+            time.sleep(2)
