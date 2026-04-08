@@ -53,15 +53,9 @@ if st.button("Search Inventory", type="primary"):
                 else:
                     # --- 1. DISPLAY AI VERDICT & LIST ---
                     st.subheader("✨ The AI Verdict")
-                    
-                    # Dynamically build the bulleted list you requested
-                    bullet_points = "**Recommendations:**\n"
-                    for pick in top_picks:
-                        category_name = pick.get('matched_intent', 'Item')
-                        bullet_points += f"* **{category_name}:** [{pick['title']}]({pick['url']})\n"
                         
                     # Render the list and the LLM's explanation inside the blue info box
-                    st.info(f"{bullet_points}\n\n{explanation}")
+                    st.info(f"{explanation}")
                     
                     st.divider()
                     
@@ -77,6 +71,11 @@ if st.button("Search Inventory", type="primary"):
                             with st.container(border=True):
                                 st.markdown(f"### 🥇 Best {pick.get('matched_intent', 'Match')}")
                                 st.markdown(f"**[{pick['title']}]({pick['url']})**")
+                                
+                                # --- Render Image for Top Picks ---
+                                if pick.get('image_url'):
+                                    st.image(pick['image_url'], use_container_width=True)
+                                
                                 st.markdown(f"**Price:** <span style='color:#2e7d32; font-size:1.2em;'>{pick['price']:,} PKR</span>", unsafe_allow_html=True)
                                 st.write(pick['description'])
                                 st.caption(f"Semantic Match Score: {pick['match_score']}%")
@@ -98,6 +97,11 @@ if st.button("Search Inventory", type="primary"):
                                     
                                     short_title = product['title'][:60] + "..." if len(product['title']) > 60 else product['title']
                                     st.markdown(f"**[{short_title}]({product['url']})**")
+                                    
+                                    # --- Render Image for Alternatives ---
+                                    if product.get('image_url'):
+                                        st.image(product['image_url'], use_container_width=True)
+                                        
                                     st.markdown(f"**Price:** {product['price']:,} PKR")
                                     short_desc = ".".join(product['description'].split('.')[:2]) + "."
                                     st.write(short_desc)

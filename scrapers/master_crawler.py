@@ -42,8 +42,21 @@ def scrape_product_data(url, category_paths):
     image_elem = soup.select_one('img#wpg-main-img')
     
     # --- 2. Enhanced Description Extraction ---
-    desc_elem = soup.select_one('div.product-description') or soup.select_one('#tab-description') or soup.select_one('.woocommerce-product-details__short-description')
-    raw_description = desc_elem.get_text(separator="\n", strip=True) if desc_elem else ""
+    short_desc_elem = soup.select_one('.woocommerce-product-details__short-description')
+    main_desc_elem = soup.select_one('div.product-description') or soup.select_one('#tab-description')
+    
+    desc_parts = []
+    
+    # Grab the short description under the title if it exists
+    if short_desc_elem:
+        desc_parts.append(short_desc_elem.get_text(separator="\n", strip=True))
+        
+    # Grab the main description tab if it exists
+    if main_desc_elem:
+        desc_parts.append(main_desc_elem.get_text(separator="\n", strip=True))
+        
+    # Combine them with a clean double line break
+    raw_description = "\n\n".join(desc_parts).strip()
 
     # --- 3. Enhanced Specification (Tabular Data) Extraction ---
     specs = {}
