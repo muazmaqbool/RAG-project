@@ -20,19 +20,25 @@ def scrape_product_data(url, category_paths):
         "specifications": {}
     }
 
-    try:
-        response = requests.get(url, headers=headers, timeout=15)
-        
-        if response.status_code == 404:
-            print(f"  [-] 404 Not Found (Marking Unavailable): {url}")
-            return base_data
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
             
-        response.raise_for_status()
-        
-    except requests.RequestException as e:
-        # CRITICAL FIX: Return the base_data instead of None so the orchestrator knows it failed
-        print(f"  [!] Connection Error for {url} (Marking Unavailable): {e}")
-        return base_data 
+            if response.status_code == 404:
+                print(f"  [-] 404 Not Found (Marking Unavailable): {url}")
+                return base_data
+                
+            response.raise_for_status()
+            break
+            
+        except requests.RequestException as e:
+            if attempt == max_retries - 1:
+                print(f"  [!] Connection Error for {url} after {max_retries} attempts (Marking Unavailable): {e}")
+                return base_data
+            else:
+                print(f"  [!] Temporary Error for {url} (Attempt {attempt+1}/{max_retries}). Retrying...")
+                time.sleep(2 ** attempt)
 
     soup = BeautifulSoup(response.content, 'html.parser')
     

@@ -30,7 +30,10 @@ DATABASE_JSON = 'data/processed/dual_layer_dataset.json'
 SCHEMA_FILE = 'data/processed/master_schema.json'
 
 def load_json(path):
-    return json.load(open(path, 'r', encoding='utf-8')) if os.path.exists(path) else []
+    if os.path.exists(path):
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return []
 
 # --- DATABASE SYNC ---
 def sync_to_postgres(dataset):
@@ -136,12 +139,22 @@ def run_ai_enrichment():
         title = item.get('title', 'Unknown')
         
         # Check if it's already in our DB and fully enriched (has embedding)
-        if url in master_db and master_db[url].get('embedding'):
+        db_title = master_db[url].get('title', '')
+        is_title_valid = bool(db_title) and db_title != 'Unknown'
+        
+        if url in master_db and master_db[url].get('embedding') and is_title_valid:
             # Just update fast-changing data
             price_val = item.get('price')
             master_db[url]['price'] = price_val
             master_db[url]['is_call_for_price'] = True if price_val is None else False
             master_db[url]['is_available'] = True
+            
+            # Non-breaking changes like updated titles or images should be synced directly
+            if item.get('title') and item.get('title') != 'Unknown':
+                master_db[url]['title'] = item.get('title')
+            if item.get('image_url'):
+                master_db[url]['image_url'] = item.get('image_url')
+                
             continue # Skip AI processing
             
         print(f"   [{index+1}/{len(scrape)}] ✨ AI Processing: {title[:40]}...")
@@ -241,10 +254,22 @@ def run_parallel_pipeline():
                 if old_price != new_price:
                     changelog.append((url, 'PRICE_CHANGED', old_price, new_price))
                     
-                if master_db[url].get('embedding') and master_db[url].get('search_specs'):
+                db_title = master_db[url].get('title', '')
+                is_title_valid = bool(db_title) and db_title != 'Unknown'
+                
+                if master_db[url].get('embedding') and master_db[url].get('search_specs') and is_title_valid:
                     master_db[url]['price'] = new_price
                     master_db[url]['is_call_for_price'] = data.get('is_call_for_price')
                     master_db[url]['is_available'] = True
+                    
+                    if data.get('title') and data.get('title') != 'Unknown':
+                        master_db[url]['title'] = data.get('title')
+                    if data.get('image_url'):
+                        master_db[url]['image_url'] = data.get('image_url')
+                else:
+                    # Re-route to AI worker if missing something critical
+                    pipeline_queue.put((url, data))
+                    new_items_sent_to_ai += 1
             else:
                 # It's a completely new item!
                 changelog.append((url, 'ADDED', None, new_price))
@@ -356,9 +381,10 @@ def retry_failed_ai():
     for url, item in master_db.items():
         has_vector = bool(item.get('embedding'))
         has_search = bool(item.get('search_specs'))
+        has_title = bool(item.get('title')) and item.get('title') != 'Unknown'
 
-        # If any of the three core pillars are missing, flag it for retry
-        if not has_vector or not has_search:
+        # If any of the core pillars are missing, flag it for retry
+        if not has_vector or not has_search or not has_title:
             failed_urls.append(url)
     
     if not failed_urls:

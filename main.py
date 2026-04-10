@@ -79,6 +79,9 @@ async def plan_search_intents(user_query: str):
     1. Group ALL features for a single product into ONE SINGLE sub_query.
     2. Extract budget limits if mentioned (e.g., "under 50k", "between 20000 and 50000"). Convert "k" to thousands (e.g., 50k = 50000).
     3. If no budget is mentioned, return null for min_price and max_price.
+    4. If bluetooth or wireless is not mentioned with handsfree, it belongs in the stereo handsfree section.
+    5. The base category for bluetooth related items is bluetooth handsfree. Bluetooth or wireless earbuds and bluetooth or wireless handsfree/neckband belong to the bluetooth handsfree category.
+    6. IMPORTANT: ALL headphones go into the speakers and headphones category. They DO NOT belong to the bluetooth handsfree category. Headphones and earuds are different items.
     
     CATEGORIES: {list(MASTER_SCHEMAS.keys())}
     
@@ -93,7 +96,7 @@ async def plan_search_intents(user_query: str):
     """
     async def call():
         return await client.chat.completions.create(
-            model="accounts/fireworks/models/mixtral-8x22b-instruct",
+            model="accounts/fireworks/models/llama-v3p3-70b-instruct",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0
         )
@@ -128,26 +131,27 @@ async def execute_sub_query(item, request_params, limit):
     CRITICAL INSTRUCTIONS:
     1. Extract ONLY specific technical requirements explicitly mentioned in the user query.
     2. Map them to the EXACT keys in the SCHEMA REFERENCE DICTIONARY.
-    3. OMIT UNMENTIONED KEYS: If the user does not explicitly mention a requirement, completely leave that key out of your JSON. Do not use null or empty strings (e.g. user mentioned a gaming laptop with gpu but didn't mention gpu brand. Leave out gpu brand completely)
-    4. FATAL ERROR (DO NOT COPY SCHEMA TEXT): The Schema Reference contains instructional text (e.g., "String. MUST be one of..."). NEVER use these instructions as the actual output value. The value MUST be the real data the user asked for.
-    5. FATAL ERROR (DO NOT WRITE INCOMPLETE INFORMATION): User query might contain incomplete information  (e.g. "I need a rtx gpu"). NEVER fill the graphics_card_name with just RTX, leave it empty. It must either be complete information or empty.
-    6. VALUE FORMATTING:
-       - For exact matches, use the raw value: "brand": "HP", "ram_gb": 8
-       - For range requests ("at least", "minimum", "max", "under", "more than"), you MUST use an operator object: 
-         {{"ram_gb": {{"operator": ">=", "value": 8}}}}
-       - Allowed operators: ">=", "<=", ">", "<", "="
+    3. OMIT UNMENTIONED KEYS: If a requirement isn't explicitly clear, completely leave that key out. 
+    4. FATAL ERROR (DO NOT COPY SCHEMA TEXT): NEVER use schema instructions (e.g., "String. MUST be one of...") as the output value.
+    5. FATAL ERROR (NO SUBJECTIVE TERMS): Words like "latest", "best", "fast", or "new" are NOT technical specs. OMIT them entirely.
+    6. VALUE FORMATTING & OPERATORS (CRITICAL):
+       - Exact match: "brand": "HP"
+       - Numbers (range): {{"ram_gb": {{"operator": ">=", "value": 16}}}}
+       - Partial Strings (Fuzzy Match): If the user mentions a fragment like "i7" or "Ryzen", you MUST use ilike: {{"processor_name": {{"operator": "ilike", "value": "i7"}}}}
+       - Multiple Options (OR logic): If the user asks for Intel OR AMD, use in: {{"processor_brand": {{"operator": "in", "value": ["Intel", "AMD"]}}}}
+       - Allowed operators: ">=", "<=", ">", "<", "=", "ilike", "in"
+       - STRICT RULE: ONLY use math (>, <) for numbers. NEVER use math operators for strings!
     
     EXAMPLES:
     - Query: "at least 16gb ram" -> {{"ram_gb": {{"operator": ">=", "value": 16}}}}
-    - Query: "maximum 8gb vram" -> {{"graphics_memory_gb": {{"operator": "<=", "value": 8}}}}
-    - Query: "Intel processor" -> {{"processor_brand": "Intel"}}
-    - Query: "I need a fast laptop" -> {{}} (Because "fast" is not a specific technical spec)
+    - Query: "an i7 laptop with max 8gb vram" -> {{"processor_name": {{"operator": "ilike", "value": "i7"}}, "graphics_memory_gb": {{"operator": "<=", "value": 8}}}}
+    - Query: "Intel or AMD processor" -> {{"processor_brand": {{"operator": "in", "value": ["Intel", "AMD"]}}}}
 
     Return EXACTLY a JSON object.
     """
     async def call():
         return await client.chat.completions.create(
-            model="accounts/fireworks/models/mixtral-8x22b-instruct",
+            model="accounts/fireworks/models/llama-v3p3-70b-instruct",
             messages=[{"role": "user", "content": filter_prompt}],
             temperature=0.0
         )
@@ -181,24 +185,37 @@ async def execute_sub_query(item, request_params, limit):
 
         # Take a safe snapshot of the base parameters BEFORE adding strict specs
         base_params = list(params)
-
-        # Apply Strict JSONB filters with Range Support
+        # Apply Strict JSONB filters with Advanced Operator Support
         spec_conditions = []
-        allowed_operators = {">=", "<=", ">", "<", "="} # Security whitelist
+        allowed_operators = {">=", "<=", ">", "<", "=", "in", "ilike"} # <-- NEW: Added in & ilike
         
         for key, value in spec_filters.items():
-            # Check if Mixtral gave us an operator object (e.g., {"operator": ">=", "value": 8})
             if isinstance(value, dict) and "operator" in value and "value" in value:
-                op = value["operator"]
+                op = value["operator"].lower()
                 val = value["value"]
                 
-                # Prevent SQL injection by validating against our whitelist
                 if op in allowed_operators:
-                    # Cast the JSON text to numeric for greater/less than math
-                    spec_conditions.append(f"(search_specs->>%s)::numeric {op} %s")
-                    params.extend([key, val])
+                    if op in {">=", "<=", ">", "<"}:
+                        # MATH: Safely cast to numeric for greater/less than
+                        spec_conditions.append(f"(search_specs->>%s)::numeric {op} %s")
+                        params.extend([key, val])
+                    
+                    elif op == "=":
+                        # EXACT TEXT: Safely compare as text to avoid numeric crashes
+                        spec_conditions.append(f"(search_specs->>%s) = %s::text")
+                        params.extend([key, str(val)])
+                        
+                    elif op == "ilike":
+                        # FUZZY TEXT: "i7" will match "Core i7 12700H"
+                        spec_conditions.append(f"(search_specs->>%s) ILIKE %s")
+                        params.extend([key, f"%{val}%"])
+                        
+                    elif op == "in" and isinstance(val, list):
+                        # MULTIPLE CHOICE: Matches if the value is ANY of the items in the list
+                        spec_conditions.append(f"(search_specs->>%s) = ANY(%s::text[])")
+                        params.extend([key, val])
             else:
-                # Standard exact match (for brands, booleans, exact numbers)
+                # Standard exact match
                 spec_conditions.append("search_specs @> %s::jsonb")
                 params.append(json.dumps({key: value}))
         
@@ -237,6 +254,7 @@ async def execute_sub_query(item, request_params, limit):
                 "price": row.get('price_pkr', 0),
                 "description": row.get('description', ''),
                 "display_specs": final_display, 
+                "search_specs": row.get('search_specs', {}),
                 "match_score": round(row.get('score', 0) * 100, 2),
                 "matched_intent": category,
                 "is_exact_match": bool(spec_conditions) and not is_fallback

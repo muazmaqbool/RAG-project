@@ -1,23 +1,12 @@
 import streamlit as st
 import requests
+import pandas as pd
 
 # Configure the web page
 st.set_page_config(page_title="AI Tech Store", page_icon="💻", layout="wide")
 
 # The URL of your local FastAPI backend
 API_URL = "http://127.0.0.1:8000/recommend"
-
-# --- SIDEBAR: FILTERS ---
-with st.sidebar:
-    st.header("Search Filters")
-    st.write("Set your budget constraints:")
-    
-    # Optional price filters
-    use_min = st.checkbox("Minimum Price")
-    min_price = st.number_input("Min (PKR)", min_value=0, step=5000, value=50000) if use_min else None
-    
-    use_max = st.checkbox("Maximum Price")
-    max_price = st.number_input("Max (PKR)", min_value=0, step=5000, value=200000) if use_max else None
 
 # --- MAIN UI ---
 st.title("🤖 AI Hardware Assistant")
@@ -34,8 +23,8 @@ if st.button("Search Inventory", type="primary"):
             payload = {
                 "query": user_query,
                 "top_k": 10,
-                "min_price": min_price,
-                "max_price": max_price
+                "min_price": None,
+                "max_price": None
             }
             
             try:
@@ -77,9 +66,50 @@ if st.button("Search Inventory", type="primary"):
                                     st.image(pick['image_url'], use_container_width=True)
                                 
                                 st.markdown(f"**Price:** <span style='color:#2e7d32; font-size:1.2em;'>{pick['price']:,} PKR</span>", unsafe_allow_html=True)
-                                st.write(pick['description'])
-                                st.caption(f"Semantic Match Score: {pick['match_score']}%")
-                    
+                                # --- DYNAMIC SHORT DESCRIPTION ---
+                                display_specs = pick.get('display_specs', {})
+                                search_specs = pick.get('search_specs', {})
+                                
+                                # Use search_specs if available, otherwise display_specs
+                                specs_dict = {k: v for k, v in search_specs.items() if v not in ("", None, [], {})}
+                                if not specs_dict:
+                                    specs_dict = {k: v for k, v in display_specs.items() if v not in ("", None, [], {})}
+                                
+                                if specs_dict:
+                                    # 2. THE PRIORITY LIST: What matters most to buyers?
+                                    # It will hunt for these keys first, in this exact order.
+                                    priority_keys = [
+                                        'processor_name', 'processor_brand', 'ram_gb', 'storage_ssd_gb', 
+                                        'graphics_card_name', 'graphics_memory_gb', 'screen_size_inches'
+                                    ]
+                                    
+                                    spec_lines = []
+                                    
+                                    # Step A: Pull the high-priority specs first
+                                    for key in priority_keys:
+                                        if key in specs_dict and specs_dict[key] not in ("", None, []):
+                                            clean_key = str(key).replace('_', ' ').title()
+                                            # Clean up common redundant keys (e.g. "Ram Gb" -> "RAM")
+                                            clean_key = clean_key.replace('Gb', '(GB)').replace('Ram', 'RAM').replace('Ssd', 'SSD')
+                                            
+                                            spec_lines.append(f"- **{clean_key}**: {specs_dict[key]}")
+                                                
+                                    # Step B: Backfill with whatever else is available
+                                    for k, v in specs_dict.items():
+                                        if k not in priority_keys and v not in ("", None, []):
+                                            clean_key = str(k).replace('_', ' ').title()
+                                            spec_lines.append(f"- **{clean_key}**: {v}")
+
+                                    short_desc = "\n".join(spec_lines)
+                                    
+                                else:
+                                    # 3. Ultimate Fallback: Truncate original description
+                                    raw_desc = pick.get('description', '')
+                                    short_desc = raw_desc[:120] + "..." if len(raw_desc) > 120 else raw_desc
+                                    
+                                # Display the new, prioritized short description
+                                st.markdown(short_desc)
+                                            
                     st.write("---")
                     
                     # --- 3. DISPLAY ALTERNATIVES ---
@@ -106,6 +136,59 @@ if st.button("Search Inventory", type="primary"):
                                     short_desc = ".".join(product['description'].split('.')[:2]) + "."
                                     st.write(short_desc)
                                     st.caption(f"Match Score: {product['match_score']}%")
+
+                    # --- 4. DISPLAY COMPARISON ---
+                    all_items = top_picks + alternatives
+                    
+                    # Group items by matched_intent category
+                    category_groups = {}
+                    for item in all_items:
+                        cat = item.get('matched_intent', 'General')
+                        if cat not in category_groups:
+                            category_groups[cat] = []
+                        category_groups[cat].append(item)
+                    
+                    # See if any category has more than 1 item
+                    categories_to_compare = {k: v for k, v in category_groups.items() if len(v) > 1}
+                    
+                    if categories_to_compare:
+                        st.write("---")
+                        st.subheader("⚖️ Compare Categories")
+                        
+                        for category, items in categories_to_compare.items():
+                            with st.expander(f"Compare {category} ({len(items)} items)", expanded=False):
+                                all_keys = set()
+                                for item in items:
+                                    specs = item.get('search_specs', {})
+                                    if not specs:
+                                        specs = item.get('display_specs', {})
+                                    all_keys.update([k for k, v in specs.items() if v not in ("", None, [], {})])
+                                
+                                comp_data = {}
+                                for item in items:
+                                    p_name = item['title'][:35] + "..." if len(item['title']) > 35 else item['title']
+                                    
+                                    # Handle duplicate names
+                                    base_name = p_name
+                                    counter = 1
+                                    while p_name in comp_data:
+                                        p_name = f"{base_name} ({counter})"
+                                        counter += 1
+                                        
+                                    p_specs = item.get('search_specs', {})
+                                    if not p_specs:
+                                        p_specs = item.get('display_specs', {})
+                                        
+                                    comp_data[p_name] = {"Price": f"{item['price']:,} PKR"}
+                                    
+                                    for k in sorted(all_keys):
+                                        val = p_specs.get(k, "N/A")
+                                        if val in ("", None, []): val = "N/A"
+                                        clean_key = str(k).replace('_', ' ').title().replace('Gb', '(GB)').replace('Ram', 'RAM').replace('Ssd', 'SSD')
+                                        comp_data[p_name][clean_key] = val
+                                        
+                                df = pd.DataFrame(comp_data)
+                                st.dataframe(df, use_container_width=True)
 
             except Exception as e:
                 st.error(f"Failed to connect to the API. Make sure your FastAPI server is running! Error: {e}")
