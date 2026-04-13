@@ -2,7 +2,7 @@ import os
 import json
 import time
 from openai import OpenAI
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -10,6 +10,7 @@ load_dotenv()
 client = OpenAI(
     base_url="https://api.fireworks.ai/inference/v1",
     api_key=os.getenv("FIREWORKS_API_KEY"),
+    timeout=15.0
 )
 
 # ==========================================
@@ -22,9 +23,11 @@ def extract_json_from_text(raw_text):
         end_idx = raw_text.rfind('}')
         if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
             return json.loads(raw_text[start_idx:end_idx + 1])
+        raise ValueError("No complete JSON object found in text.")
     except Exception as e:
-        print(f"      ⚠️ JSON Parse Error in AI Toolkit: {e}")
-    return {}
+        # We deliberately raise the error instead of returning {}
+        # so the upstream AI tools correctly trigger their retry loops!
+        raise ValueError(f"JSON Parse Error: {e}")
 
 def generate_vector(text_chunk, max_retries=3):
     """Centralized vector generator with auto-retry."""

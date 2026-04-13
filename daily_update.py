@@ -133,16 +133,23 @@ def run_ai_enrichment():
         print("❌ Scrape empty. Run Step 2 first."); return
         
     schemas = load_json(SCHEMA_FILE)
+    ignored_categories = load_json('data/ignored_categories.json')
     new_items_processed = 0
 
     for index, (url, item) in enumerate(scrape.items()):
+        raw_cats = item.get('categories', [])
+        categories_str = " | ".join(raw_cats).lower() if raw_cats else ""
+        search_str = (url + " " + categories_str).lower()
+        if ignored_categories and any(ig.lower() in search_str for ig in ignored_categories):
+            continue
+            
         title = item.get('title', 'Unknown')
         
-        # Check if it's already in our DB and fully enriched (has embedding)
-        db_title = master_db[url].get('title', '')
+        db_item = master_db.get(url, {})
+        db_title = db_item.get('title', '')
         is_title_valid = bool(db_title) and db_title != 'Unknown'
         
-        if url in master_db and master_db[url].get('embedding') and is_title_valid:
+        if db_item and db_item.get('embedding') and is_title_valid:
             # Just update fast-changing data
             price_val = item.get('price')
             master_db[url]['price'] = price_val
@@ -228,6 +235,7 @@ def run_parallel_pipeline():
     master_db = {item['url']: item for item in load_json(DATABASE_JSON)}
     url_dict = load_json('data/raw/master_product_urls.json')
     schemas = load_json(SCHEMA_FILE)
+    ignored_categories = load_json('data/ignored_categories.json')
     
     if not url_dict:
         print("❌ Master URLs missing. Run Step 1 first.")
@@ -240,9 +248,18 @@ def run_parallel_pipeline():
     def scraper_worker():
         count = 0
         new_items_sent_to_ai = 0
+        total_urls = len(url_dict)
         
         for url, categories in url_dict.items():
             count += 1
+            if count % 10 == 0:
+                print(f"  🕷️ [Scraper] Fast-scanning {count}/{total_urls} URLs...")
+            
+            categories_str = " | ".join(categories).lower() if categories else ""
+            search_str = (url + " " + categories_str).lower()
+            if ignored_categories and any(ig.lower() in search_str for ig in ignored_categories):
+                continue
+                
             data = scrape_product_data(url, categories)
             new_price = data.get('price')
             
@@ -278,10 +295,6 @@ def run_parallel_pipeline():
                 
             time.sleep(0.5) 
             
-        pipeline_queue.put(None)
-            
-        # Send a "Poison Pill" to tell the AI worker to shut down when done
-        pipeline_queue.put(None)
         print(f"🛑 Scraper finished! Sent {new_items_sent_to_ai} items to AI out of {count} total URLs.")
 
     # --- CONSUMER: The AI Thread ---
@@ -348,14 +361,22 @@ def run_parallel_pipeline():
 
     # --- EXECUTE THE THREADS ---
     t1 = threading.Thread(target=scraper_worker)
-    t2 = threading.Thread(target=ai_worker)
     
-    # --- EXECUTE THE THREADS ---
+    num_ai_workers = 10
+    ai_threads = [threading.Thread(target=ai_worker) for _ in range(num_ai_workers)]
+    
     t1.start()
-    t2.start()
+    for t in ai_threads:
+        t.start()
     
     t1.join()
-    t2.join()
+    
+    # Send enough poison pills for all workers to shut down since the scraper is done
+    for _ in range(num_ai_workers):
+        pipeline_queue.put(None)
+        
+    for t in ai_threads:
+        t.join()
     
     print("🧹 Performing soft-delete check for removed products...")
     for db_url in master_db.keys():
@@ -447,6 +468,40 @@ def retry_failed_ai():
     sync_to_postgres(list(master_db.values()))
     print("🎉 AI Retry Complete and synced to database!")
 
+def manage_ignored_categories():
+    ignore_file = 'data/ignored_categories.json'
+    ignored = load_json(ignore_file)
+    while True:
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print("=========================================")
+        print("   🚫 SETTINGS: IGNORED CATEGORIES")
+        print("=========================================")
+        if not ignored:
+            print("  No categories currently ignored.")
+        else:
+            print("  Currently Ignored Keywords:")
+            for idx, keyword in enumerate(ignored):
+                print(f"    - {keyword}")
+        print("=========================================")
+        
+        choice = input("\nEnter a keyword to toggle its ignore status (or type '0' to return): ").strip()
+        
+        if choice == '0':
+            break
+        elif choice:
+            keyword_lower = choice.lower()
+            existing = [k for k in ignored if k.lower() == keyword_lower]
+            if existing:
+                ignored.remove(existing[0])
+                print(f"\n✅ Removed '{existing[0]}' from ignore list.")
+            else:
+                ignored.append(choice)
+                print(f"\n✅ Added '{choice}' to ignore list.")
+            
+            with open(ignore_file, 'w', encoding='utf-8') as f:
+                json.dump(ignored, f, indent=4)
+            time.sleep(1)
+
 # --- THE INTERACTIVE DASHBOARD ---
 def interactive_menu():
     while True:
@@ -482,6 +537,7 @@ def interactive_menu():
         print("[5] Run FULL Pipeline (1 through 4)")
         print("[6] 🚀 Run Scraper + AI in PARALLEL (Option 3)") # <--- NEW
         print("[7] 🛠️ Retry Failed AI Tasks (No Scraping)")
+        print("[8] ⚙️ Settings: Manage Ignored Categories")
         print("[0] Exit")
         
         choice = input("\nSelect a step to run: ")
@@ -513,6 +569,8 @@ def interactive_menu():
         elif choice == '7':
             retry_failed_ai()
             input("\nPress Enter to return to menu...")
+        elif choice == '8':
+            manage_ignored_categories()
         else:
             print("Invalid choice.")
 

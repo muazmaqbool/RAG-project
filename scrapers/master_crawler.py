@@ -126,10 +126,16 @@ def scrape_product_data(url, category_paths):
 def run_web_scraper():
     input_file = 'data/raw/master_product_urls.json'
     output_file = 'data/raw/todays_scrape.json' 
+    ignore_file = 'data/ignored_categories.json'
     
     print("Loading Master URLs...")
     with open(input_file, 'r', encoding='utf-8') as f:
         url_dict = json.load(f)
+        
+    ignored_categories = []
+    if os.path.exists(ignore_file):
+        with open(ignore_file, 'r', encoding='utf-8') as f:
+            ignored_categories = json.load(f)
         
     total_urls = len(url_dict)
     final_dataset = []
@@ -137,14 +143,19 @@ def run_web_scraper():
     
     # --- RESUMABILITY LOGIC ---
     if os.path.exists(output_file):
-        print("Found existing dataset. Loading to resume progress...")
-        with open(output_file, 'r', encoding='utf-8') as f:
-            try:
-                final_dataset = json.load(f)
-                scraped_urls = {item['url'] for item in final_dataset}
-                print(f"Resuming from item {len(scraped_urls)}...")
-            except json.JSONDecodeError:
-                print("Error reading existing file. Starting fresh.")
+        print(f"⚠️ Found existing scrape data from a previous run.")
+        choice = input("Do you want to [R]esume or start a [F]resh daily scrape? (r/f): ").strip().lower()
+        if choice == 'f':
+            os.remove(output_file)
+            print("Deleted old scrape. Starting fresh...")
+        else:
+            with open(output_file, 'r', encoding='utf-8') as f:
+                try:
+                    final_dataset = json.load(f)
+                    scraped_urls = {item['url'] for item in final_dataset}
+                    print(f"Resuming from item {len(scraped_urls)}...")
+                except json.JSONDecodeError:
+                    print("Error reading existing file. Starting fresh.")
     
     count = 0
     new_items_this_run = 0
@@ -153,6 +164,10 @@ def run_web_scraper():
         count += 1
         
         if url in scraped_urls:
+            continue
+            
+        categories_str = " | ".join(categories).lower() if categories else ""
+        if ignored_categories and any(ig.lower() in categories_str for ig in ignored_categories):
             continue
             
         print(f"Scraping {count}/{total_urls}: {url}")
