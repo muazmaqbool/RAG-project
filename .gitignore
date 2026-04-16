@@ -3,6 +3,7 @@ venv/
 env/
 .env
 utils/
+frontend/
 old_documentation.md
 
 # Python artifacts

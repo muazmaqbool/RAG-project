@@ -29,11 +29,52 @@ TODAYS_SCRAPE = 'data/raw/todays_scrape.json'
 DATABASE_JSON = 'data/processed/dual_layer_dataset.json'
 SCHEMA_FILE = 'data/processed/master_schema.json'
 
+import tempfile
+
 def load_json(path):
     if os.path.exists(path):
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return []
+    
+def atomic_save_json(data, target_path):
+    """Safely saves JSON to a temp file first, then atomically replaces the target file."""
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(target_path), suffix='.json')
+    with os.fdopen(fd, 'w') as f:
+        json.dump(data, f, indent=4)
+    os.replace(tmp_path, target_path)
+
+def load_and_clean_db(path):
+    """Loads database, aggressively purges corrupted arrays and Unkown titles, and returns dict."""
+    raw_data = load_json(path)
+    clean_db = []
+    purged = 0
+    
+    for item in raw_data:
+        if not isinstance(item, dict) or 'url' not in item:
+            purged += 1
+            continue
+            
+        title = item.get('title', 'Unknown')
+        if title == 'Unknown' or not title.strip():
+            purged += 1
+            continue
+            
+        emb = item.get('embedding', [])
+        if emb and len(emb) != 768:
+            purged += 1
+            continue
+            
+        clean_db.append(item)
+        
+    if purged > 0:
+        print(f"🧹 [Auto-Heal] Vacuumed {purged} corrupted/stub items from DB.")
+        atomic_save_json(clean_db, path)
+        
+    # Optional logic: Convert immediately to indexed dict or let the caller do it?
+    # Caller does it. Returns list of dicts.
+    return clean_db
 
 # --- DATABASE SYNC ---
 def sync_to_postgres(dataset):
@@ -126,7 +167,7 @@ def sync_history_to_postgres(changelog):
 
 # --- PHASE 2: AI ETL LOGIC ---
 def run_ai_enrichment():
-    master_db = {item['url']: item for item in load_json(DATABASE_JSON)}
+    master_db = {item['url']: item for item in load_and_clean_db(DATABASE_JSON)}
     scrape = {item['url']: item for item in load_json(TODAYS_SCRAPE)}
     
     if not scrape:
@@ -135,6 +176,7 @@ def run_ai_enrichment():
     schemas = load_json(SCHEMA_FILE)
     ignored_categories = load_json('data/ignored_categories.json')
     new_items_processed = 0
+    changelog = []
 
     for index, (url, item) in enumerate(scrape.items()):
         raw_cats = item.get('categories', [])
@@ -146,6 +188,16 @@ def run_ai_enrichment():
         title = item.get('title', 'Unknown')
         
         db_item = master_db.get(url, {})
+        new_price = item.get('price')
+        
+        # --- NEW: History Logic ---
+        if db_item:
+            old_price = db_item.get('price')
+            if old_price != new_price:
+                changelog.append((url, 'PRICE_CHANGED', old_price, new_price))
+        else:
+            changelog.append((url, 'ADDED', None, new_price))
+            
         db_title = db_item.get('title', '')
         is_title_valid = bool(db_title) and db_title != 'Unknown'
         
@@ -216,23 +268,27 @@ def run_ai_enrichment():
         # --- THE CTRL+C SAVIOR: Save every 5 items ---
         if new_items_processed % 5 == 0:
             print("   💾 Saving state...")
-            with open(DATABASE_JSON, 'w') as f: 
-                json.dump(list(master_db.values()), f, indent=4)
+            atomic_save_json(list(master_db.values()), DATABASE_JSON)
         time.sleep(2) 
 
     # Final Soft Delete & Save
     for url in (set(master_db.keys()) - set(scrape.keys())):
-        master_db[url]['is_available'] = False
+        if master_db[url].get('is_available', True):
+            old_price = master_db[url].get('price')
+            changelog.append((url, 'REMOVED', old_price, None))
+            master_db[url]['is_available'] = False
 
-    with open(DATABASE_JSON, 'w') as f: 
-        json.dump(list(master_db.values()), f, indent=4)
+    atomic_save_json(list(master_db.values()), DATABASE_JSON)
+        
     print("🎉 AI Enrichment Complete.")
+    if changelog:
+        sync_history_to_postgres(changelog)
 
 # --- PHASE 3: THE PARALLEL PIPELINE (OPTION 3) ---
 def run_parallel_pipeline():
     print("🚀 Starting Parallel Pipeline (Scraper + AI)...")
     
-    master_db = {item['url']: item for item in load_json(DATABASE_JSON)}
+    master_db = {item['url']: item for item in load_and_clean_db(DATABASE_JSON)}
     url_dict = load_json('data/raw/master_product_urls.json')
     schemas = load_json(SCHEMA_FILE)
     ignored_categories = load_json('data/ignored_categories.json')
@@ -241,8 +297,11 @@ def run_parallel_pipeline():
         print("❌ Master URLs missing. Run Step 1 first.")
         return
 
+    choice = input("Do you want to [R]esume a partial run or start a [F]resh full daily update? (r/f): ").strip().lower()
+
     pipeline_queue = Queue(maxsize=20)
     changelog = [] # <--- NEW: The global ledger for this run
+    db_lock = threading.Lock()
 
     # --- PRODUCER: The Scraper Thread ---
     def scraper_worker():
@@ -252,8 +311,16 @@ def run_parallel_pipeline():
         
         for url, categories in url_dict.items():
             count += 1
-            if count % 10 == 0:
-                print(f"  🕷️ [Scraper] Fast-scanning {count}/{total_urls} URLs...")
+            print(f"  🕷️ [Scraper] Fast-scanning {count}/{total_urls} URLs: {url}")
+            
+            # --- RESUME LOGIC ---
+            if choice == 'r' and url in master_db:
+                db_item = master_db[url]
+                db_title = db_item.get('title', '')
+                is_title_valid = bool(db_title) and db_title != 'Unknown'
+                # If fully enriched, skip scraping it entirely to recover from the crash swiftly!
+                if db_item.get('embedding') and db_item.get('search_specs') and is_title_valid:
+                    continue
             
             categories_str = " | ".join(categories).lower() if categories else ""
             search_str = (url + " " + categories_str).lower()
@@ -343,20 +410,21 @@ def run_parallel_pipeline():
             if 'specifications' in item: del item['specifications']
             
             # Update master memory
-            master_db[url] = item
+            with db_lock:
+                master_db[url] = item
             processed_count += 1
             
             # Save state every 5 items so you don't lose progress if you crash
             if processed_count % 5 == 0:
                 print("  💾 [AI Worker] Saving state to JSON...")
-                with open(DATABASE_JSON, 'w') as f: 
-                    json.dump(list(master_db.values()), f, indent=4)
+                with db_lock:
+                    atomic_save_json(list(master_db.values()), DATABASE_JSON)
                     
             pipeline_queue.task_done()
 
         # Final save when the queue is completely empty
-        with open(DATABASE_JSON, 'w') as f: 
-            json.dump(list(master_db.values()), f, indent=4)
+        with db_lock:
+            atomic_save_json(list(master_db.values()), DATABASE_JSON)
         print("🎉 AI Worker finished processing all queued items.")
 
     # --- EXECUTE THE THREADS ---
@@ -394,7 +462,7 @@ def run_parallel_pipeline():
 # --- PHASE 4: THE MOP-UP CREW (AI RETRY) ---
 def retry_failed_ai():
     print("🔄 Scanning database for failed AI enrichments...")
-    master_db = {item['url']: item for item in load_json(DATABASE_JSON)}
+    master_db = {item['url']: item for item in load_and_clean_db(DATABASE_JSON)}
     schemas = load_json(SCHEMA_FILE)
     
     # Deep Clean: Find items missing embeddings OR missing search/display specs
@@ -456,14 +524,12 @@ def retry_failed_ai():
         # Save state every 5 items
         if (index + 1) % 5 == 0:
             print("  💾 Saving state to JSON...")
-            with open(DATABASE_JSON, 'w') as f: 
-                json.dump(list(master_db.values()), f, indent=4)
+            atomic_save_json(list(master_db.values()), DATABASE_JSON)
                 
         time.sleep(2) # Respect API rate limits
 
     # Final save and sync
-    with open(DATABASE_JSON, 'w') as f: 
-        json.dump(list(master_db.values()), f, indent=4)
+    atomic_save_json(list(master_db.values()), DATABASE_JSON)
     
     sync_to_postgres(list(master_db.values()))
     print("🎉 AI Retry Complete and synced to database!")
@@ -497,9 +563,7 @@ def manage_ignored_categories():
             else:
                 ignored.append(choice)
                 print(f"\n✅ Added '{choice}' to ignore list.")
-            
-            with open(ignore_file, 'w', encoding='utf-8') as f:
-                json.dump(ignored, f, indent=4)
+            atomic_save_json(ignored, 'data/ignored_categories.json')
             time.sleep(1)
 
 # --- THE INTERACTIVE DASHBOARD ---
@@ -513,7 +577,7 @@ def interactive_menu():
         # Calculate pending items
         master_urls = load_json('data/raw/master_product_urls.json')
         todays_scrape = load_json(TODAYS_SCRAPE)
-        master_db = load_json(DATABASE_JSON)
+        master_db = load_and_clean_db(DATABASE_JSON)
         
         total_urls = len(master_urls) if master_urls else 0
         scraped_count = len(todays_scrape) if todays_scrape else 0
@@ -530,14 +594,10 @@ def interactive_menu():
         print(f"  - Items AI Enriched: {enriched_count} (Pending: {max(0, pending_ai)})")
         print("=========================================")
         
-        print("[1] Find URLs (build_master_list)")
-        print("[2] Scrape HTML (run_web_scraper)")
-        print("[3] Run AI Pipeline")
-        print("[4] Sync to PostgreSQL Database")
-        print("[5] Run FULL Pipeline (1 through 4)")
-        print("[6] 🚀 Run Scraper + AI in PARALLEL (Option 3)") # <--- NEW
-        print("[7] 🛠️ Retry Failed AI Tasks (No Scraping)")
-        print("[8] ⚙️ Settings: Manage Ignored Categories")
+        print("[1] 🗺️ Map Website URLs (Updates Master List)")
+        print("[2] 🚀 Run FULL Daily Update (Parallel Scrape + AI + DB Sync)")
+        print("[3] 🛠️ Retry Failed AI Tasks (No Scraping)")
+        print("[4] ⚙️ Settings: Manage Ignored Categories")
         print("[0] Exit")
         
         choice = input("\nSelect a step to run: ")
@@ -546,33 +606,19 @@ def interactive_menu():
             build_master_list()
             input("\nPress Enter to return to menu...")
         elif choice == '2':
-            run_web_scraper()
+            run_parallel_pipeline()
             input("\nPress Enter to return to menu...")
         elif choice == '3':
-            run_ai_enrichment()
+            retry_failed_ai()
             input("\nPress Enter to return to menu...")
         elif choice == '4':
-            sync_to_postgres(load_json(DATABASE_JSON))
-            input("\nPress Enter to return to menu...")
-        elif choice == '5':
-            build_master_list()
-            run_web_scraper()
-            run_ai_enrichment()
-            sync_to_postgres(load_json(DATABASE_JSON))
-            input("\nPress Enter to return to menu...")
+            manage_ignored_categories()
         elif choice == '0':
             print("Exiting...")
             break
-        elif choice == '6':
-            run_parallel_pipeline()
-            input("\nPress Enter to return to menu...")
-        elif choice == '7':
-            retry_failed_ai()
-            input("\nPress Enter to return to menu...")
-        elif choice == '8':
-            manage_ignored_categories()
         else:
             print("Invalid choice.")
+            time.sleep(1)
 
 if __name__ == "__main__":
     interactive_menu()

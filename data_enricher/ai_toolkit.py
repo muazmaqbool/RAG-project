@@ -1,6 +1,8 @@
 import os
 import json
 import time
+import re
+import json_repair
 from openai import OpenAI
 from ddgs import DDGS
 from dotenv import load_dotenv
@@ -17,17 +19,19 @@ client = OpenAI(
 # CORE UTILITIES
 # ==========================================
 
-def extract_json_from_text(raw_text):
+def extract_json_from_text(raw_text: str):
     try:
-        start_idx = raw_text.find('{')
-        end_idx = raw_text.rfind('}')
-        if start_idx != -1 and end_idx != -1 and start_idx < end_idx:
-            return json.loads(raw_text[start_idx:end_idx + 1])
-        raise ValueError("No complete JSON object found in text.")
+        # Use the battle-tested deterministic parser wrapper!
+        parsed_dict = json_repair.repair_json(raw_text, return_objects=True)
+        if isinstance(parsed_dict, dict) and parsed_dict:
+            return parsed_dict
+        elif isinstance(parsed_dict, list) and len(parsed_dict) > 0 and isinstance(parsed_dict[0], dict):
+            return parsed_dict[0]
+            
+        raise ValueError("Return type was not a dictionary")
     except Exception as e:
-        # We deliberately raise the error instead of returning {}
-        # so the upstream AI tools correctly trigger their retry loops!
-        raise ValueError(f"JSON Parse Error: {e}")
+        # Raise the error so the upstream API retries with a new token generation sequence
+        raise ValueError(f"JSON-Repair Structural Error: {e}")
 
 def generate_vector(text_chunk, max_retries=3):
     """Centralized vector generator with auto-retry."""
@@ -107,7 +111,8 @@ def hunt_ghost_data(product_title, search_context, max_retries=3):
             response = client.chat.completions.create(
                 model="accounts/fireworks/models/mixtral-8x22b-instruct",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.1
+                temperature=0.1,
+                response_format={"type": "json_object"}
             )
             return extract_json_from_text(response.choices[0].message.content)
         except Exception as e:
@@ -168,7 +173,8 @@ def extract_search_specs(title, description, raw_specs, target_schema, max_retri
             response = client.chat.completions.create(
                 model="accounts/fireworks/models/mixtral-8x22b-instruct",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.0
+                temperature=0.0,
+                response_format={"type": "json_object"}
             )
             return extract_json_from_text(response.choices[0].message.content)
         except Exception as e:
