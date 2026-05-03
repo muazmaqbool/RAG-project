@@ -1,4 +1,10 @@
 import json
+import os
+import sys
+
+# Ensure the root directory is in the python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from main import extract_search_intent_and_constraints, generate_query_vector, get_db_connection, evaluate_constraints
 
 # The problematic query

@@ -2,16 +2,24 @@
 venv/
 env/
 .env
-utils/
-frontend/
-old_documentation.md
+
+# Code Folders (Ensuring they are NOT ignored)
+!utils/
+!frontend/
+!scripts/
 
 # Python artifacts
 __pycache__/
 *.pyc
+.ruff_cache/
+.ipynb_checkpoints/
 
-# Data (We don't want to push thousands of JSON files to Git)
+# Data
 data/
 
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints/
+# Docker volumes
+pgdata/
+
+# OS and Logs
+.DS_Store
+*.log

@@ -4,9 +4,14 @@ import asyncio
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import AsyncOpenAI  # <--- UPGRADED
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
+
+# --- New API routers ---
+from api.products import router as products_router
+from api.admin import router as admin_router
 
 load_dotenv()
 
@@ -24,7 +29,38 @@ if os.path.exists(SCHEMA_PATH):
 else:
     MASTER_SCHEMAS = {"General": {}}
 
-app = FastAPI(title="Agentic E-Commerce RAG")
+app = FastAPI(title="Al-Aqsa Computers API")
+
+# ---------------------------------------------------------------------------
+# CORS — allow the React dev server (localhost:5173) and production domain
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",     # Vite default
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",     # Vite on this machine
+        "http://127.0.0.1:8080",
+        "http://localhost:8081",     # Vite on alternate port
+        "http://127.0.0.1:8081",
+        "http://192.168.18.134:8080", # LAN access
+        "http://192.168.18.99:8081", # LAN access (new IP)
+        "https://alaqsa.com.pk",     # production
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+from fastapi.staticfiles import StaticFiles
+
+# Register routers
+app.include_router(products_router)
+app.include_router(admin_router)
+
+# Mount local uploads directory
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
 
 class SearchQuery(BaseModel):
     query: str
@@ -370,7 +406,7 @@ async def get_ai_recommendation(request: SearchQuery):
     
     async def call():
         return await client.chat.completions.create(
-            model="accounts/fireworks/models/mixtral-8x22b-instruct",
+            model="accounts/fireworks/models/llama-v3p3-70b-instruct",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1 # Lowered temperature slightly to make it strictly follow the counting rules
         )

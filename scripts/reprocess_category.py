@@ -5,12 +5,17 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 
+# Ensure the root directory is in the python path
+import sys
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(ROOT_DIR)
+
 # --- MODULAR IMPORTS ---
 from data_enricher.ai_toolkit import extract_search_specs
 
 load_dotenv()
 
-SCHEMA_FILE = 'data/processed/master_schema.json'
+SCHEMA_FILE = os.path.join(ROOT_DIR, 'data/processed/master_schema.json')
 
 def get_db_connection():
     return psycopg2.connect(

@@ -138,12 +138,17 @@ The user-facing search engine that intercepts queries, converts them to math, an
 
 ---
 
-### Phase 5: Administration & Maintenance (`utils/`)
-Utility scripts isolated from the daily pipeline, reserved for disaster recovery and future expansion.
+### Phase 5: Administration & Maintenance
+Utility scripts isolated from the daily pipeline, reserved for disaster recovery, debugging, and future expansion.
 
+#### Directory: `utils/`
 * **`load_to_db.py`:** A disaster-recovery tool. If the PostgreSQL database is accidentally dropped, this script blasts the local `dual_layer_dataset.json` backup directly into the DB in seconds without requiring AI reprocessing.
 * **`extract_specs.py`:** A schema-bootstrapping tool. Used when the store expands into brand-new product categories (e.g., Smart TVs). It scans the raw scraped DOM data and prints a list of all unique spec keys found in the wild to aid in building new `master_schema.json` rules.
 
+#### Directory: `scripts/`
+* **`audit_db.py` & `audit_short_specs.py`:** Database health checks to ensure no sparse vectors or empty specs exist.
+* **`debug_rag.py`:** A CLI tool to trace the exact semantic math and constraint filtering of a user query through the RAG pipeline.
+* **`reprocess_category.py`:** A surgical tool to re-run AI extraction on a single product category if the schema rules change.
 
 ## 5. Data Modeling & Database Schema
 
@@ -179,7 +184,19 @@ The separation of `search_specs` and `display_specs` is a primary cost-saving an
 
 ## 6. Environment & Configuration
 
-To run this pipeline and backend locally, the following environment variables must be configured in a `.env` file at the root directory. The pipeline is fully functional on the free tiers of these services.
+The local development environment relies on Docker Desktop and Python virtual environments to ensure parity and architecture compatibility (especially for Apple Silicon).
+
+### Docker & Database Setup
+The database infrastructure is fully containerized to ensure cross-platform compatibility without needing global PostgreSQL installations.
+1. Install **Docker Desktop**.
+2. Run `docker compose up -d` in the root directory. This will pull `ankane/pgvector` and spin up the database.
+3. The `docker-compose.yml` mounts two essential volumes:
+   - `pgdata/`: Persists the database physically on your machine.
+   - `init.sql`: Automatically runs on first boot to build the `products`, `product_history`, and `media_gallery` tables.
+4. Manage and query the database visually using **pgAdmin4** connected to `localhost:5432`.
+
+### Environment Variables
+To run this pipeline and backend locally, the following environment variables must be configured in a `.env` file at the root directory.
 
 ```env
 # AI Inference (Fireworks API)
